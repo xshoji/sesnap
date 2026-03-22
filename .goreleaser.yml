@@ -11,8 +11,8 @@ builds:
       - arm64
     flags:
       - -trimpath
-    ldflags: 
-      - -s -w
+    ldflags:
+      - -s -w -X main.version={{.Version}}
     # クロスコンパイル時はCGO_ENABLEDはデフォルトでは有効にならない。なので有効にしたが
     # linux_syscall.c:67:13: error: implicit declaration of function 'setresgid' is invalid in C99
     # がでるので今回は無効化する

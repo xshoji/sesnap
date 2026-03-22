@@ -30,6 +30,9 @@ func (s *stringSlice) Set(v string) error {
 	return nil
 }
 
+// version is set at build time via ldflags.
+var version = "dev"
+
 const (
 	Req = "\x1b[33m(required)\x1b[0m "
 )
@@ -378,7 +381,7 @@ func customUsage(description string) func() {
 			return fmt.Sprintf("  %-"+optionFieldWidth+"s %s\n", re.FindStringSubmatch(m)[1]+" "+valueType, re.FindStringSubmatch(m)[4])
 		}), "\n")
 		sort.SliceStable(usages, func(i, j int) bool { return strings.Contains(usages[i], Req) && !strings.Contains(usages[j], Req) })
-		fmt.Fprintf(flag.CommandLine.Output(), "Usage: %s [OPTIONS]\n\n", func() string { e, _ := os.Executable(); return filepath.Base(e) }())
+		fmt.Fprintf(flag.CommandLine.Output(), "Usage: %s (version: %s) [OPTIONS]\n\n", func() string { e, _ := os.Executable(); return filepath.Base(e) }(), version)
 		fmt.Fprintf(flag.CommandLine.Output(), "Description:\n  %s\n\n", description)
 		fmt.Fprintf(flag.CommandLine.Output(), "Options:\n%s", strings.Join(usages, "\n"))
 	}
