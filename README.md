@@ -1,15 +1,17 @@
 # chromedp-screenshots
 
-A command-line tool for taking web page screenshots using [chromedp](https://github.com/chromedp/chromedp) (headless Chrome). Supports CSS selector-based element capture, full-page screenshots, multiple URLs in parallel, and Chrome profile reuse.
+A fast, lock-free web page screenshot tool powered by [chromedp](https://github.com/chromedp/chromedp) (headless Chrome). Only Chrome is required — no Puppeteer, no Playwright, no Node.js, no Python.
 
-## Features
+### Why chromedp-screenshots?
 
-- **Viewport screenshot** – capture the visible area with configurable width, height, and scale factor
-- **Element screenshot** – target a specific element via CSS selector (`-q`)
-- **Full-page screenshot** – capture the entire scrollable page (`-f`)
-- **Multiple URLs** – pass multiple `-u` flags to capture several pages in parallel (one Chrome process, separate tabs)
-- **Chrome profile support** – reuse an existing Chrome profile for logged-in sessions (`-pd`)
+- **Parallel capture** – Multiple URLs are captured simultaneously in separate tabs within a single Chrome process. No sequential waiting — all pages load and render at the same time.
+- **Lock-free profile usage** – When using a Chrome profile (`-p`), the tool copies it to an isolated cache directory. This means you can take screenshots with your logged-in session **even while your main browser is running** — no profile lock conflicts.
+
+### Other Features
+
+- **Viewport / Element / Full-page screenshot** – capture the visible area, a specific CSS selector (`-q`), or the entire scrollable page (`-f`)
 - **Custom Chrome flags** – pass arbitrary Chrome flags with `-c`
+- **Idempotent execution** – without `-r`, the cached profile is always freshly copied, ensuring consistent results regardless of previous runs
 
 ## Requirements
 
@@ -33,7 +35,7 @@ go build -o chromedp-screenshots .
 ## Usage
 
 ```bash
-go run main.go -u <URL> [options]
+go run main.go -u <URL> -o /tmp/screenshot.png [options]
 ```
 
 ### Options
@@ -41,17 +43,18 @@ go run main.go -u <URL> [options]
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-u` | *(required)* | URL to capture (can be specified multiple times) |
+| `-o` | *(required)* | Output file path (auto-numbered with multiple URLs: `_001.png`, `_002.png`, …) |
 | `-q` | `""` | CSS selector – screenshot the first matching element |
-| `-o` | `/tmp/img.png` | Output file path (auto-numbered with multiple URLs: `_001.png`, `_002.png`, …) |
-| `-pd` | `""` | Chrome profile directory to copy and cache |
+| `-p` | `""` | Chrome profile directory to copy and cache |
 | `-w` | `3` | Wait seconds after navigation before capturing |
 | `-wi` | `1280` | Viewport width |
 | `-he` | `860` | Viewport height |
-| `-ds` | `2.0` | Device scale factor (2.0 = Retina) |
+| `-s` | `2.0` | Device scale factor (2.0 = Retina) |
 | `-f` | `false` | Enable full-page screenshot |
 | `-d` | `false` | Enable debug mode |
 | `-n` | `false` | Disable headless mode (show browser window) |
-| `-s` | `false` | Save cached profile (do not delete after execution) |
+| `-r` | `false` | Reuse cached profile (do not delete after execution) |
+| `-t` | `NumCPU` | Max number of parallel tabs for screenshot capture |
 | `-c` | `""` | Extra Chrome flag as `key=value` (can be specified multiple times) |
 
 ### Examples
@@ -71,18 +74,28 @@ go run main.go -u="https://www.yahoo.co.jp/" -u="https://www.google.com/" -o=/tm
 
 # With Chrome profile (for logged-in sessions)
 go run main.go -u="https://example.com/dashboard" \
-  -pd="/Users/you/Library/Application Support/Google/Chrome/Default" \
-  -s -o=/tmp/dashboard.png
+  -p="/Users/you/Library/Application Support/Google/Chrome/Default" \
+  -r -o=/tmp/dashboard.png
 
 # Custom Chrome flags
 go run main.go -u="https://example.com/" -c "lang=ja" -c "disable-extensions"
 ```
 
+### Details of the -p flag and the Google Chrome profile directory
+
+> Chromium Docs - User Data Directory  
+> https://chromium.googlesource.com/chromium/src/+/HEAD/docs/user_data_dir.md  
+
+- The `-p` flag specifies a Chrome profile directory to copy and use for the screenshot session. This allows you to capture pages with your logged-in session without locking your main browser.
+- The profile is copied to an isolated cache directory (`~/.chromedpscreenshots/`), so the original profile is never modified.
+- Without `-r`, the cached copy is deleted after each run for idempotency. With `-r`, it is kept for reuse.
+
+
 ### Environment Variables
 
 | Variable | Description |
 |----------|-------------|
-| `CHROMEDP_SCREENSHOT_CACHE_DIR` | Override the default profile cache directory (`~/.chromedpscreenshot`) |
+| `CHROMEDP_SCREENSHOTS_CACHE_DIR` | Override the default profile cache directory (`~/.chromedpscreenshots`) |
 
 ## Development
 
