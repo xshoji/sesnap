@@ -23,7 +23,7 @@ A web page screenshot tool with parallel multi-URL capture and lock-free Chrome 
 ### Homebrew
 
 ```bash
-brew install xshoji/tap/cdpss
+brew install xshoji/tap/cds
 ```
 
 
@@ -32,13 +32,13 @@ brew install xshoji/tap/cdpss
 ```bash
 git clone https://github.com/xshoji/chromedp-screenshots.git
 cd chromedp-screenshots
-go build -ldflags="-s -w" -trimpath -o cdpss main.go
+go build -ldflags="-s -w" -trimpath -o cds main.go
 ```
 
 ## Usage
 
 ```bash
-cdpss -u <URL> -o /tmp/screenshot.png [options]
+cds -u <URL> -o /tmp/screenshot.png [options]
 ```
 
 ### Options

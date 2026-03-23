@@ -1,7 +1,7 @@
 version: 2
 builds:
   - main: main.go
-    binary: cdpss
+    binary: cds
     goos:
       - windows
       - darwin
@@ -36,7 +36,7 @@ snapshot:
   name_template: "{{ .Tag }}-next-{{.ShortCommit}}"
   version_template: "{{ .Tag }}-next"
 brews:
-  - name: cdpss
+  - name: cds
     repository:
       owner: xshoji
       name: homebrew-tap
@@ -45,7 +45,7 @@ brews:
     homepage: https://github.com/xshoji/chromedp-screenshots
     description: A web page screenshot tool with parallel multi-URL capture and lock-free Chrome profile support, powered by chromedp (headless Chrome). Only Chrome is required — no Puppeteer, no Playwright, no Node.js, no Python.
     install: |
-      bin.install "cdpss"
+      bin.install "cds"
 changelog:
   sort: asc
   filters:
