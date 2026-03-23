@@ -111,8 +111,11 @@ func main() {
 	}
 	results := make(chan result, len(urls))
 	sem := make(chan struct{}, *arguments.parallel)
+	var wg sync.WaitGroup
 	for i, u := range urls {
+		wg.Add(1)
 		go func(i int, u string) {
+			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
@@ -141,6 +144,7 @@ func main() {
 			log.Fatal(r.err)
 		}
 	}
+	wg.Wait()
 
 	// --- 6. Cleanup ---
 	// Shut down Chrome before deleting profile to release file locks
@@ -282,7 +286,7 @@ func takeScreenshot(ctx context.Context, url string) ([]byte, error) {
 			_, _, _, _, err := page.Navigate(url).Do(ctx)
 			return err
 		}),
-		chromedp.Sleep(time.Duration(*arguments.waitSeconds) * time.Second),
+		chromedp.Sleep(time.Duration(*arguments.waitSeconds)*time.Second),
 	); err != nil {
 		return nil, err
 	}
