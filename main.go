@@ -268,12 +268,8 @@ func newBrowserContext() (context.Context, func()) {
 
 // takeScreenshot navigates to the URL and captures a screenshot.
 func takeScreenshot(ctx context.Context, url string) ([]byte, error) {
-	var buf []byte
-
-	// Build tasks: set viewport -> navigate -> wait -> capture
-	// All steps run in a single Run call to avoid race conditions
-	// when multiple tabs set viewport metrics concurrently.
-	tasks := chromedp.Tasks{
+	// Set viewport -> navigate -> wait
+	if err := chromedp.Run(ctx,
 		emulation.SetDeviceMetricsOverride(
 			*arguments.windowWidth,
 			*arguments.windowHeight,
@@ -287,127 +283,103 @@ func takeScreenshot(ctx context.Context, url string) ([]byte, error) {
 			return err
 		}),
 		chromedp.Sleep(time.Duration(*arguments.waitSeconds) * time.Second),
-	}
-
-	// Wait & capture
-	switch {
-	case *arguments.fullScreenshot:
-		// Resize the viewport to the full page height, then take a normal
-		// viewport screenshot. This avoids captureBeyondViewport which is
-		// unreliable when multiple tabs capture concurrently.
-		tasks = append(tasks, chromedp.ActionFunc(func(ctx context.Context) error {
-			var dims []int64
-			if err := chromedp.Evaluate(
-				`[document.documentElement.scrollWidth, Math.max(document.documentElement.scrollHeight, document.body.scrollHeight)]`,
-				&dims,
-			).Do(ctx); err != nil {
-				return err
-			}
-			fullWidth, fullHeight := dims[0], dims[1]
-			// Use page width from settings but expand height to full content
-			w := *arguments.windowWidth
-			if fullWidth > w {
-				w = fullWidth
-			}
-			// Clamp to Chrome's max texture size to avoid tiling artifacts
-			if w > maxViewportDim {
-				w = maxViewportDim
-			}
-			if fullHeight > maxViewportDim {
-				fullHeight = maxViewportDim
-			}
-			if err := emulation.SetDeviceMetricsOverride(
-				w,
-				fullHeight,
-				*arguments.deviceScaleFactor,
-				false,
-			).Do(ctx); err != nil {
-				return err
-			}
-			data, err := page.CaptureScreenshot().WithFormat(page.CaptureScreenshotFormatPng).Do(ctx)
-			if err != nil {
-				return err
-			}
-			buf = data
-			return nil
-		}))
-	case *arguments.querySelector != "":
-		// Get the element's bounding rect, resize viewport to contain it,
-		// then capture with a clip. This avoids captureBeyondViewport which
-		// is unreliable when multiple tabs capture concurrently.
-		qs := *arguments.querySelector
-		tasks = append(tasks,
-			chromedp.WaitVisible(qs, chromedp.ByQuery),
-			chromedp.ActionFunc(func(ctx context.Context) error {
-				var rect []float64
-				if err := chromedp.Evaluate(
-					`(function(){var r=document.querySelector(`+"`"+qs+"`"+`).getBoundingClientRect();return[r.x,r.y,r.width,r.height]})()`,
-					&rect,
-				).Do(ctx); err != nil {
-					return err
-				}
-				x, y, w, h := rect[0], rect[1], rect[2], rect[3]
-				// Expand viewport so the element is fully visible
-				needW := int64(math.Ceil(x + w))
-				needH := int64(math.Ceil(y + h))
-				if needW < *arguments.windowWidth {
-					needW = *arguments.windowWidth
-				}
-				if needH < *arguments.windowHeight {
-					needH = *arguments.windowHeight
-				}
-				// Clamp to Chrome's max texture size to avoid tiling artifacts
-				if needW > maxViewportDim {
-					needW = maxViewportDim
-				}
-				if needH > maxViewportDim {
-					needH = maxViewportDim
-				}
-				if err := emulation.SetDeviceMetricsOverride(
-					needW, needH, *arguments.deviceScaleFactor, false,
-				).Do(ctx); err != nil {
-					return err
-				}
-				// Re-read rect after viewport resize (layout may shift)
-				if err := chromedp.Evaluate(
-					`(function(){var r=document.querySelector(`+"`"+qs+"`"+`).getBoundingClientRect();return[r.x,r.y,r.width,r.height]})()`,
-					&rect,
-				).Do(ctx); err != nil {
-					return err
-				}
-				x, y, w, h = rect[0], rect[1], rect[2], rect[3]
-				data, err := page.CaptureScreenshot().
-					WithFormat(page.CaptureScreenshotFormatPng).
-					WithClip(&page.Viewport{
-						X: math.Round(x), Y: math.Round(y),
-						Width:  math.Round(w + x - math.Round(x)),
-						Height: math.Round(h + y - math.Round(y)),
-						Scale:  1,
-					}).
-					Do(ctx)
-				if err != nil {
-					return err
-				}
-				buf = data
-				return nil
-			}),
-		)
-	default:
-		// No selector: capture the entire viewport
-		tasks = append(tasks, chromedp.ActionFunc(func(ctx context.Context) error {
-			data, err := page.CaptureScreenshot().WithFormat(page.CaptureScreenshotFormatPng).Do(ctx)
-			if err != nil {
-				return err
-			}
-			buf = data
-			return nil
-		}))
-	}
-
-	if err := chromedp.Run(ctx, tasks); err != nil {
+	); err != nil {
 		return nil, err
 	}
-	return buf, nil
+
+	// Capture
+	switch {
+	case *arguments.fullScreenshot:
+		return captureFullPage(ctx)
+	case *arguments.querySelector != "":
+		return captureElement(ctx, *arguments.querySelector)
+	default:
+		return captureViewport(ctx, nil)
+	}
+}
+
+// captureFullPage resizes the viewport to the full page dimensions and takes
+// a normal viewport screenshot. This avoids captureBeyondViewport which is
+// unreliable when multiple tabs capture concurrently.
+func captureFullPage(ctx context.Context) ([]byte, error) {
+	var dims []int64
+	if err := chromedp.Evaluate(
+		`[document.documentElement.scrollWidth, Math.max(document.documentElement.scrollHeight, document.body.scrollHeight)]`,
+		&dims,
+	).Do(ctx); err != nil {
+		return nil, err
+	}
+	w := max(*arguments.windowWidth, dims[0])
+	h := dims[1]
+	if err := emulation.SetDeviceMetricsOverride(
+		clampDim(w), clampDim(h), *arguments.deviceScaleFactor, false,
+	).Do(ctx); err != nil {
+		return nil, err
+	}
+	return captureViewport(ctx, nil)
+}
+
+// captureElement expands the viewport to contain the target element, then
+// captures it with a clip rect. This avoids captureBeyondViewport which is
+// unreliable when multiple tabs capture concurrently.
+func captureElement(ctx context.Context, selector string) ([]byte, error) {
+	if err := chromedp.WaitVisible(selector, chromedp.ByQuery).Do(ctx); err != nil {
+		return nil, err
+	}
+
+	x, y, w, h, err := getElementRect(ctx, selector)
+	if err != nil {
+		return nil, err
+	}
+	// Expand viewport so the element is fully visible
+	needW := max(*arguments.windowWidth, int64(math.Ceil(x+w)))
+	needH := max(*arguments.windowHeight, int64(math.Ceil(y+h)))
+	if err := emulation.SetDeviceMetricsOverride(
+		clampDim(needW), clampDim(needH), *arguments.deviceScaleFactor, false,
+	).Do(ctx); err != nil {
+		return nil, err
+	}
+
+	// Re-read rect after viewport resize (layout may shift)
+	x, y, w, h, err = getElementRect(ctx, selector)
+	if err != nil {
+		return nil, err
+	}
+	rx, ry := math.Round(x), math.Round(y)
+	return captureViewport(ctx, &page.Viewport{
+		X: rx, Y: ry,
+		Width:  math.Round(w + x - rx),
+		Height: math.Round(h + y - ry),
+		Scale:  1,
+	})
+}
+
+// captureViewport takes a PNG screenshot of the current viewport.
+// If clip is non-nil, only the specified region is captured.
+func captureViewport(ctx context.Context, clip *page.Viewport) ([]byte, error) {
+	action := page.CaptureScreenshot().WithFormat(page.CaptureScreenshotFormatPng)
+	if clip != nil {
+		action = action.WithClip(clip)
+	}
+	return action.Do(ctx)
+}
+
+// getElementRect returns the bounding client rect of the first element
+// matching the given CSS selector.
+func getElementRect(ctx context.Context, selector string) (x, y, w, h float64, err error) {
+	var rect []float64
+	if err = chromedp.Evaluate(
+		`(function(){var r=document.querySelector(`+"`"+selector+"`"+`).getBoundingClientRect();return[r.x,r.y,r.width,r.height]})()`,
+		&rect,
+	).Do(ctx); err != nil {
+		return
+	}
+	return rect[0], rect[1], rect[2], rect[3], nil
+}
+
+// clampDim clamps a dimension to Chrome's max texture size to avoid tiling artifacts.
+func clampDim(v int64) int64 {
+	return min(v, maxViewportDim)
 }
 
 // removeStaleChromeLocks removes lock files left by previous crashed runs.
