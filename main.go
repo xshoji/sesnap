@@ -134,6 +134,12 @@ func main() {
 			}
 
 			outPath := outputPath(i)
+			if dir := filepath.Dir(outPath); dir != "." {
+				if err := os.MkdirAll(dir, 0755); err != nil {
+					results <- result{i, fmt.Errorf("create dir %s: %w", dir, err)}
+					return
+				}
+			}
 			if err := os.WriteFile(outPath, buf, 0644); err != nil {
 				results <- result{i, fmt.Errorf("write %s: %w", outPath, err)}
 				return
