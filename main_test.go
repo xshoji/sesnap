@@ -112,57 +112,25 @@ func TestSetupProfileCache_EmptyProfileDir(t *testing.T) {
 	}
 }
 
-func TestSetupProfileCache_CopiesProfile(t *testing.T) {
+func TestSetupProfileCache_CopiesProfileToTempDir(t *testing.T) {
 	// Create a fake profile source directory with a marker file
 	srcDir := t.TempDir()
 	os.WriteFile(filepath.Join(srcDir, "Cookies"), []byte("data"), 0644)
 
-	cacheRoot := t.TempDir()
-	t.Setenv("CHROMEDP_SCREENSHOTS_CACHE_DIR", cacheRoot)
 	setProfileDir(srcDir)
 	setReUseProfile(false)
 
 	got := setupProfileCache()
+	defer os.RemoveAll(got)
+
 	profileName := filepath.Base(srcDir)
-	wantDir := filepath.Join(cacheRoot, "userdata-"+profileName)
-	if got != wantDir {
-		t.Fatalf("setupProfileCache() = %q, want %q", got, wantDir)
+	// Should be a temp directory, not under chromeProfileCacheRoot
+	if got == "" {
+		t.Fatal("setupProfileCache() returned empty string")
 	}
 	// Verify marker file was copied
-	if _, err := os.Stat(filepath.Join(wantDir, profileName, "Cookies")); err != nil {
+	if _, err := os.Stat(filepath.Join(got, profileName, "Cookies")); err != nil {
 		t.Errorf("Cookies file should exist in cached profile: %v", err)
-	}
-}
-
-func TestSetupProfileCache_IdempotentDeletesExisting(t *testing.T) {
-	srcDir := t.TempDir()
-	os.WriteFile(filepath.Join(srcDir, "Cookies"), []byte("new"), 0644)
-
-	cacheRoot := t.TempDir()
-	t.Setenv("CHROMEDP_SCREENSHOTS_CACHE_DIR", cacheRoot)
-	setProfileDir(srcDir)
-	setReUseProfile(false)
-
-	// Pre-create stale cached profile with old data
-	profileName := filepath.Base(srcDir)
-	staleDir := filepath.Join(cacheRoot, "userdata-"+profileName, profileName)
-	os.MkdirAll(staleDir, 0700)
-	os.WriteFile(filepath.Join(staleDir, "Cookies"), []byte("old"), 0644)
-	os.WriteFile(filepath.Join(staleDir, "StaleFile"), []byte("stale"), 0644)
-
-	setupProfileCache()
-
-	// StaleFile should be gone (old dir was deleted and re-copied)
-	if _, err := os.Stat(filepath.Join(staleDir, "StaleFile")); err == nil {
-		t.Error("StaleFile should have been removed by idempotent delete")
-	}
-	// Cookies should have new content
-	data, err := os.ReadFile(filepath.Join(staleDir, "Cookies"))
-	if err != nil {
-		t.Fatalf("Cookies should exist: %v", err)
-	}
-	if string(data) != "new" {
-		t.Errorf("Cookies = %q, want %q", string(data), "new")
 	}
 }
 
@@ -266,7 +234,7 @@ func TestE2E_ViewportScreenshot(t *testing.T) {
 	arguments.querySelector = strPtr("")
 	chromeFlags = nil
 
-	browserCtx, shutdown := newBrowserContext()
+	browserCtx, shutdown := newBrowserContext("")
 	defer shutdown()
 	if err := chromedp.Run(browserCtx); err != nil {
 		t.Fatalf("failed to start browser: %v", err)
@@ -314,7 +282,7 @@ func TestE2E_FullPageScreenshot(t *testing.T) {
 	arguments.querySelector = strPtr("")
 	chromeFlags = nil
 
-	browserCtx, shutdown := newBrowserContext()
+	browserCtx, shutdown := newBrowserContext("")
 	defer shutdown()
 	if err := chromedp.Run(browserCtx); err != nil {
 		t.Fatalf("failed to start browser: %v", err)

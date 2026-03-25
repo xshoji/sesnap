@@ -100,7 +100,7 @@ func main() {
 	profileCacheDir := setupProfileCache()
 
 	// --- 2. Browser context ---
-	browserCtx, shutdownBrowser := newBrowserContext()
+	browserCtx, shutdownBrowser := newBrowserContext(profileCacheDir)
 	defer shutdownBrowser()
 
 	// --- 3. Start browser (must be done before parallel tabs) ---
@@ -175,49 +175,55 @@ func outputPath(index int) string {
 // setupProfileCache copies the specified Chrome profile to a cache directory.
 // Returns the cache directory path to clean up later (empty string if no profile specified).
 //
+// With -r (reuse): uses a persistent directory under chromeProfileCacheRoot()
+// Without -r:      uses a temporary directory (os.MkdirTemp), deleted on exit
+//
 // Cache structure:
 //
-//	~/.chromedpscreenshot/userdata-<profileName>/             <- user-data-dir
-//	~/.chromedpscreenshot/userdata-<profileName>/<profileName>/ <- copied profile data
+//	<cacheRoot>/userdata-<profileName>/               <- user-data-dir
+//	<cacheRoot>/userdata-<profileName>/<profileName>/ <- copied profile data
 func setupProfileCache() string {
 	if *arguments.profileDir == "" {
 		return ""
 	}
 
 	profileName := filepath.Base(*arguments.profileDir)
-	userDataDir := filepath.Join(chromeProfileCacheRoot(), "userdata-"+profileName)
-	profileSubDir := filepath.Join(userDataDir, profileName)
 
 	if *arguments.reUseProfile {
-		// Reuse mode: skip deletion, reuse existing cache if present
+		// Reuse mode: persistent directory under home (or env var)
+		userDataDir := filepath.Join(chromeProfileCacheRoot(), "userdata-"+profileName)
+		profileSubDir := filepath.Join(userDataDir, profileName)
 		if _, err := os.Stat(profileSubDir); err == nil {
 			log.Printf("reuse cached profile: %s", profileSubDir)
 			return userDataDir
 		}
-	} else {
-		// Idempotent mode: delete existing cache to avoid reusing stale profile
-		if _, err := os.Stat(profileSubDir); err == nil {
-			log.Printf("delete existing cached profile for idempotency: %s", profileSubDir)
-			if err := os.RemoveAll(userDataDir); err != nil {
-				log.Fatalf("failed to delete existing cached profile: %v", err)
-			}
+		if err := os.MkdirAll(userDataDir, 0700); err != nil {
+			log.Fatalf("failed to create cache dir: %v", err)
 		}
+		if err := os.CopyFS(profileSubDir, os.DirFS(*arguments.profileDir)); err != nil {
+			log.Fatalf("failed to copy profile: %v", err)
+		}
+		log.Printf("copied profile: %s -> %s", *arguments.profileDir, profileSubDir)
+		return userDataDir
 	}
 
-	if err := os.MkdirAll(userDataDir, 0700); err != nil {
-		log.Fatalf("failed to create cache dir: %v", err)
+	// Non-reuse mode: use a temporary directory
+	userDataDir, err := os.MkdirTemp("", "chromedpscreenshots-userdata-")
+	if err != nil {
+		log.Fatalf("failed to create temp dir: %v", err)
 	}
+	profileSubDir := filepath.Join(userDataDir, profileName)
 	if err := os.CopyFS(profileSubDir, os.DirFS(*arguments.profileDir)); err != nil {
 		log.Fatalf("failed to copy profile: %v", err)
 	}
 	log.Printf("copied profile: %s -> %s", *arguments.profileDir, profileSubDir)
-
 	return userDataDir
 }
 
 // newBrowserContext creates a chromedp browser context with the configured options.
+// userDataDir is the profile cache directory returned by setupProfileCache (empty if no profile).
 // Returns the context and a shutdown function that can be called multiple times safely.
-func newBrowserContext() (context.Context, func()) {
+func newBrowserContext(userDataDir string) (context.Context, func()) {
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
 		chromedp.Flag("headless", !*arguments.noHeadless),
 		chromedp.Flag("disable-gpu", true),
@@ -235,9 +241,8 @@ func newBrowserContext() (context.Context, func()) {
 		}
 	}
 
-	if *arguments.profileDir != "" {
+	if userDataDir != "" {
 		profileName := filepath.Base(*arguments.profileDir)
-		userDataDir := filepath.Join(chromeProfileCacheRoot(), "userdata-"+profileName)
 		removeStaleChromeLocks(userDataDir)
 		opts = append(opts,
 			chromedp.Flag("user-data-dir", userDataDir),
