@@ -1,8 +1,8 @@
-# chromedp-screenshots
+# sitesnap
 
 A web page screenshot tool with parallel multi-URL capture and lock-free Chrome profile support, powered by [chromedp](https://github.com/chromedp/chromedp) (headless Chrome). Only Chrome is required — no Puppeteer, no Playwright, no Node.js, no Python.
 
-### Why chromedp-screenshots?
+### Why sitesnap?
 
 - **Parallel capture** – Multiple URLs are captured simultaneously in separate tabs within a single Chrome process. No sequential waiting — all pages load and render at the same time.
 - **Lock-free profile usage** – When using a Chrome profile (`-p`), the tool copies it to an isolated cache directory. This means you can take screenshots with your logged-in session **even while your main browser is running** — no profile lock conflicts.
@@ -26,22 +26,22 @@ A web page screenshot tool with parallel multi-URL capture and lock-free Chrome 
 ### Homebrew
 
 ```bash
-brew install xshoji/tap/cps
+brew install xshoji/tap/sitesnap
 ```
 
 
 ### Build from source
 
 ```bash
-git clone https://github.com/xshoji/chromedp-screenshots.git
-cd chromedp-screenshots
-go build -ldflags="-s -w" -trimpath -o cps main.go
+git clone https://github.com/xshoji/sitesnap.git
+cd sitesnap
+go build -ldflags="-s -w" -trimpath -o sitesnap main.go
 ```
 
 ## Usage
 
 ```bash
-cps -u <URL> -o /tmp/screenshot.png [options]
+sitesnap -u <URL> -o /tmp/screenshot.png [options]
 ```
 
 ### Options
@@ -67,27 +67,27 @@ cps -u <URL> -o /tmp/screenshot.png [options]
 
 ```bash
 # Viewport screenshot
-cps -u="https://www.example.com/" -wi=1280 -he=800 -o=/tmp/example.png
+sitesnap -u="https://www.example.com/" -wi=1280 -he=800 -o=/tmp/example.png
 
 # Element screenshot with CSS selector
-cps -u="https://news.yahoo.co.jp/" -q="#liveStream" -o="/tmp/livestream.png"
+sitesnap -u="https://news.yahoo.co.jp/" -q="#liveStream" -o="/tmp/livestream.png"
 
 # Full-page screenshot
-cps -u="https://www.example.com/" -f -o=/tmp/fullpage.png
+sitesnap -u="https://www.example.com/" -f -o=/tmp/fullpage.png
 
 # Multiple URLs (parallel capture)
-cps -u="https://www.yahoo.co.jp/" -u="https://www.google.com/" -o=/tmp/sites.png
+sitesnap -u="https://www.yahoo.co.jp/" -u="https://www.google.com/" -o=/tmp/sites.png
 
 # With Chrome profile (for logged-in sessions)
-cps -u="https://example.com/dashboard" \
+sitesnap -u="https://example.com/dashboard" \
   -p="/Users/you/Library/Application Support/Google/Chrome/Default" \
   -r -o=/tmp/dashboard.png
 
 # With browser-style address bar
-cps -u="https://www.example.com/" -b -o=/tmp/with_bar.png
+sitesnap -u="https://www.example.com/" -b -o=/tmp/with_bar.png
 
 # Custom Chrome flags
-cps -u="https://example.com/" -c "lang=ja" -c "disable-extensions"
+sitesnap -u="https://example.com/" -c "lang=ja" -c "disable-extensions"
 ```
 
 ### Details of the -p flag and the Google Chrome profile directory
@@ -97,8 +97,8 @@ cps -u="https://example.com/" -c "lang=ja" -c "disable-extensions"
 
 - The `-p` flag specifies a Chrome profile directory to copy and use for the screenshot session. This allows you to capture pages with your logged-in session without locking your main browser.
 - The original profile is never modified — it is always copied to an isolated directory.
-- **Without `-r`**: the profile is copied to a system temporary directory (e.g., `/tmp/chromedpscreenshots-userdata-*`) and automatically deleted after each run. Your home directory is never touched.
-- **With `-r`**: the profile is copied to a persistent cache directory (`~/.chromedpscreenshots/`, overridable via `CHROMEDP_SCREENSHOTS_CACHE_DIR`) and kept for reuse across runs.
+- **Without `-r`**: the profile is copied to a system temporary directory (e.g., `/tmp/sitesnap-userdata-*`) and automatically deleted after each run. Your home directory is never touched.
+- **With `-r`**: the profile is copied to a persistent cache directory (`~/.sitesnap/`, overridable via `SITESNAP_CACHE_DIR`) and kept for reuse across runs.
 
 
 ### Limitations
@@ -113,14 +113,14 @@ cps -u="https://example.com/" -c "lang=ja" -c "disable-extensions"
 
 | Variable | Description |
 |----------|-------------|
-| `CHROMEDP_SCREENSHOTS_CACHE_DIR` | Override the default persistent profile cache directory used with `-r` (default: `~/.chromedpscreenshots`) |
+| `SITESNAP_CACHE_DIR` | Override the default persistent profile cache directory used with `-r` (default: `~/.sitesnap`) |
 
 ## Development
 
 ### Build
 
 ```bash
-go build -ldflags="-s -w" -trimpath -o cps main.go
+go build -ldflags="-s -w" -trimpath -o sitesnap main.go
 ```
 
 ### Test
@@ -130,7 +130,7 @@ go build -ldflags="-s -w" -trimpath -o cps main.go
 go test -v
 
 # All tests including E2E (Chrome required)
-CHROMEDP_SCREENSHOTS_E2E=1 go test -v
+SITESNAP_E2E=1 go test -v
 ```
 
 ## Release

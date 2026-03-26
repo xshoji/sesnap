@@ -1,8 +1,8 @@
-# AGENTS.md — chromedp-screenshots
+# AGENTS.md — sitesnap
 
 ## Project Overview
 
-chromedp-screenshots (`cps`) is a CLI tool that takes web page screenshots using headless Chrome via [chromedp](https://github.com/chromedp/chromedp). The entire tool is a single `main.go` with no external dependencies beyond chromedp. Only Chrome is required — no Node.js, no Puppeteer, no Playwright.
+sitesnap is a CLI tool that takes web page screenshots using headless Chrome via [chromedp](https://github.com/chromedp/chromedp). The entire tool is a single `main.go` with no external dependencies beyond chromedp. Only Chrome is required — no Node.js, no Puppeteer, no Playwright.
 
 ### Key Selling Points
 
@@ -70,16 +70,16 @@ The same approach is applied to `-q` (element screenshots): we expand the viewpo
 go test -v
 
 # E2E tests (Chrome required)
-CHROMEDP_SCREENSHOTS_E2E=1 go test -v
+SITESNAP_E2E=1 go test -v
 ```
 
 - Unit tests cover: `outputPath`, `stringSlice`, `chromeProfileCacheRoot`, `removeStaleChromeLocks`, `setupProfileCache`, `cleanupProfileCache`
-- E2E tests (`TestE2E_*`) require `CHROMEDP_SCREENSHOTS_E2E=1` and a running Chrome installation
+- E2E tests (`TestE2E_*`) require `SITESNAP_E2E=1` and a running Chrome installation
 
 ## Build
 
 ```bash
-go build -ldflags="-s -w" -trimpath -o cps main.go
+go build -ldflags="-s -w" -trimpath -o sitesnap main.go
 ```
 
 ## Conventions
@@ -87,5 +87,5 @@ go build -ldflags="-s -w" -trimpath -o cps main.go
 - Single-file project: all code in `main.go`, tests in `main_test.go`
 - Package-level `var arguments` struct holds all flag pointers
 - `stringSlice` type enables repeated flags (`-u`, `-c`)
-- Profile cache lives under `~/.chromedpscreenshots/` (overridable via `CHROMEDP_SCREENSHOTS_CACHE_DIR`)
+- Profile cache lives under `~/.sitesnap/` (overridable via `SITESNAP_CACHE_DIR`)
 - Output numbering for multiple URLs: `<base>_001.png`, `_002.png`, ...
