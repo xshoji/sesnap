@@ -219,14 +219,13 @@ func TestE2E_ViewportScreenshot(t *testing.T) {
 
 	w := int64(1280)
 	h := int64(860)
-	s := 2.0
 	ws := 1
 	f := false
 	d := false
 	n := false
 	arguments.windowWidth = &w
 	arguments.windowHeight = &h
-	arguments.deviceScaleFactor = &s
+	deviceScaleFactor = 2.0
 	arguments.waitSeconds = &ws
 	arguments.fullScreenshot = &f
 	arguments.debug = &d
@@ -267,14 +266,13 @@ func TestE2E_FullPageScreenshot(t *testing.T) {
 
 	w := int64(1280)
 	h := int64(860)
-	s := 2.0
 	ws := 1
 	f := true
 	d := false
 	n := false
 	arguments.windowWidth = &w
 	arguments.windowHeight = &h
-	arguments.deviceScaleFactor = &s
+	deviceScaleFactor = 2.0
 	arguments.waitSeconds = &ws
 	arguments.fullScreenshot = &f
 	arguments.debug = &d

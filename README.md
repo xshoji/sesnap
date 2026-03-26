@@ -55,7 +55,6 @@ cps -u <URL> -o /tmp/screenshot.png [options]
 | `-w` | `3` | Wait seconds after navigation before capturing |
 | `-wi` | `1280` | Viewport width |
 | `-he` | `860` | Viewport height |
-| `-s` | `2.0` | Device scale factor (2.0 = Retina) |
 | `-f` | `false` | Enable full-page screenshot |
 | `-b` | `false` | Add browser-style address bar (favicon + URL) to the top of screenshot |
 | `-d` | `false` | Enable debug mode |
@@ -104,17 +103,11 @@ cps -u="https://example.com/" -c "lang=ja" -c "disable-extensions"
 
 ### Limitations
 
-- **Full-page screenshot size limit** — Full-page (`-f`) and element (`-q`) screenshots are limited by Chrome's GPU texture size of 16384 physical pixels per axis. With the default scale factor (`-s 2.0`), this means pages taller or wider than **8192 CSS pixels** will be clipped. At `-s 1.0`, the limit is 16384 CSS pixels.
+- **Full-page screenshot size limit** — Full-page (`-f`) and element (`-q`) screenshots are limited by Chrome's GPU texture size of 16384 physical pixels per axis. With the default scale factor (2.0), this means pages taller or wider than **8192 CSS pixels** will be clipped. At scale factor 1.0, the limit is 16384 CSS pixels.
 
 ### Tips
 
 - **Icon fonts showing as ✕ marks** — Web fonts (e.g., Font Awesome, Material Icons) may not finish loading within the default wait time. Try increasing `-w` (e.g., `-w 10`).
-- **Custom DNS resolution** — Use `-c` with `host-resolver-rules` to override DNS resolution:
-  ```bash
-  cps -u="https://example.com/" \
-    -c "host-resolver-rules=MAP example.com 127.0.0.1" \
-    -o=/tmp/screenshot.png
-  ```
 
 ### Environment Variables
 

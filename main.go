@@ -18,8 +18,10 @@ import (
 	"regexp"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/chromedp/cdproto/emulation"
@@ -48,23 +50,23 @@ const (
 )
 
 var (
-	commandDescription = "A fast, multi-page screenshot tool that requires only Chrome. Supports profile specification without locking your main browser.\n  Set CHROMEDP_SCREENSHOTS_CACHE_DIR to override the default profile cache directory (~/.chromedpscreenshot)."
+	commandDescription = "A fast, multi-page screenshot tool that requires only Chrome. Supports profile specification without locking your main browser.\n  Set CHROMEDP_SCREENSHOTS_CACHE_DIR to override the default profile cache directory (~/.chromedpscreenshot).\n  Device scale factor can be changed via -c \"device-scale-factor=1.0\" (default: 2.0 Retina).\n  Custom DNS resolution via -c \"host-resolver-rules=MAP example.com 127.0.0.1\"."
 	urls               stringSlice
 	chromeFlags        stringSlice
+	deviceScaleFactor  = 2.0
 	arguments          = struct {
-		outputPath        *string
-		querySelector     *string
-		profileDir        *string
-		waitSeconds       *int
-		windowWidth       *int64
-		windowHeight      *int64
-		deviceScaleFactor *float64
-		fullScreenshot    *bool
-		showAddressBar    *bool
-		debug             *bool
-		noHeadless        *bool
-		reUseProfile      *bool
-		parallel          *int
+		outputPath     *string
+		querySelector  *string
+		profileDir     *string
+		waitSeconds    *int
+		windowWidth    *int64
+		windowHeight   *int64
+		fullScreenshot *bool
+		showAddressBar *bool
+		debug          *bool
+		noHeadless     *bool
+		reUseProfile   *bool
+		parallel       *int
 	}{
 		flag.String("o", "" /*    */, Req+"Output path of screenshot (with multiple URLs, auto-numbered: <base>_001.png, _002.png, ...)"),
 		flag.String("q", "" /*    */, "Query selector. Screenshot the first matching element. ( e.g. -q=\".className#id\" )"),
@@ -72,7 +74,6 @@ var (
 		flag.Int("w", 3 /*        */, "Wait seconds after page navigation before taking screenshot"),
 		flag.Int64("wi", 1280 /*  */, "Viewport width (affects page layout, e.g. responsive design). Without -q, this is the output image width"),
 		flag.Int64("he", 860 /*   */, "Viewport height (affects page layout, e.g. responsive design). Without -q, this is the output image height"),
-		flag.Float64("s", 2.0 /* */, "Device scale factor (2.0 = Retina)"),
 		flag.Bool("f", false /*   */, "\nEnable full screenshot mode"),
 		flag.Bool("b", false /*   */, "\nAdd browser-style address bar to the top of screenshot"),
 		flag.Bool("d", false /*   */, "\nEnable debug mode"),
@@ -96,12 +97,38 @@ func main() {
 		os.Exit(0)
 	}
 
+	// Parse device-scale-factor from -c flags (e.g. -c "device-scale-factor=1.5")
+	for _, cf := range chromeFlags {
+		k, v, _ := strings.Cut(cf, "=")
+		if k == "device-scale-factor" && v != "" {
+			if f, err := strconv.ParseFloat(v, 64); err == nil {
+				deviceScaleFactor = f
+			} else {
+				log.Fatalf("invalid device-scale-factor value: %s", v)
+			}
+		}
+	}
+
 	// --- 1. Profile cache setup ---
 	profileCacheDir := setupProfileCache()
 
 	// --- 2. Browser context ---
 	browserCtx, shutdownBrowser := newBrowserContext(profileCacheDir)
-	defer shutdownBrowser()
+	cleanup := func() {
+		shutdownBrowser()
+		cleanupProfileCache(profileCacheDir)
+	}
+	defer cleanup()
+
+	// Handle interrupt signals
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		sig := <-sigCh
+		log.Printf("signal received: %v, shutting down...", sig)
+		cleanup()
+		os.Exit(0)
+	}()
 
 	// --- 3. Start browser (must be done before parallel tabs) ---
 	if err := chromedp.Run(browserCtx); err != nil {
@@ -154,11 +181,6 @@ func main() {
 			log.Fatal(r.err)
 		}
 	}
-
-	// --- 6. Cleanup ---
-	// Shut down Chrome before deleting profile to release file locks
-	shutdownBrowser()
-	cleanupProfileCache(profileCacheDir)
 }
 
 // outputPath returns the output file path for the i-th URL.
@@ -263,16 +285,6 @@ func newBrowserContext(userDataDir string) (context.Context, func()) {
 
 	browserCtx, browserCancel := chromedp.NewContext(allocCtx, ctxOpts...)
 
-	// Handle interrupt signals
-	signals := make(chan os.Signal, 1)
-	signal.Notify(signals, os.Kill, os.Interrupt)
-	go func() {
-		<-signals
-		browserCancel()
-		allocCancel()
-		os.Exit(0)
-	}()
-
 	var once sync.Once
 	shutdown := func() {
 		once.Do(func() {
@@ -293,7 +305,7 @@ func takeScreenshot(ctx context.Context, url string) ([]byte, error) {
 		emulation.SetDeviceMetricsOverride(
 			*arguments.windowWidth,
 			*arguments.windowHeight,
-			*arguments.deviceScaleFactor,
+			deviceScaleFactor,
 			false,
 		),
 		// Use page.Navigate directly to avoid hanging on pages
@@ -383,7 +395,7 @@ func captureFullPage(ctx context.Context) ([]byte, error) {
 	w := max(*arguments.windowWidth, dims[0])
 	h := dims[1]
 	if err := emulation.SetDeviceMetricsOverride(
-		clampDim(w), clampDim(h), *arguments.deviceScaleFactor, false,
+		clampDim(w), clampDim(h), deviceScaleFactor, false,
 	).Do(ctx); err != nil {
 		return nil, err
 	}
@@ -403,7 +415,7 @@ func captureElement(ctx context.Context, selector string) ([]byte, error) {
 	needW := max(*arguments.windowWidth, int64(math.Ceil(x+w)))
 	needH := max(*arguments.windowHeight, int64(math.Ceil(y+h)))
 	if err := emulation.SetDeviceMetricsOverride(
-		clampDim(needW), clampDim(needH), *arguments.deviceScaleFactor, false,
+		clampDim(needW), clampDim(needH), deviceScaleFactor, false,
 	).Do(ctx); err != nil {
 		return nil, err
 	}
@@ -543,7 +555,7 @@ func addAddressBar(ctx context.Context, pageURL string, pageBuf []byte) ([]byte,
 	pageW := pageImg.Bounds().Dx()
 
 	// Calculate CSS width to match the page screenshot pixel width
-	cssW := int64(math.Round(float64(pageW) / *arguments.deviceScaleFactor))
+	cssW := int64(math.Round(float64(pageW) / deviceScaleFactor))
 	const barCSSH int64 = 52
 
 	// Build address bar HTML and capture it in the same tab
@@ -552,7 +564,7 @@ func addAddressBar(ctx context.Context, pageURL string, pageBuf []byte) ([]byte,
 
 	var barBuf []byte
 	if err := chromedp.Run(ctx,
-		emulation.SetDeviceMetricsOverride(cssW, barCSSH, *arguments.deviceScaleFactor, false),
+		emulation.SetDeviceMetricsOverride(cssW, barCSSH, deviceScaleFactor, false),
 		chromedp.Navigate(dataURL),
 		chromedp.Sleep(500*time.Millisecond),
 		chromedp.ActionFunc(func(ctx context.Context) error {
@@ -605,7 +617,7 @@ func buildAddressBarHTML(pageURL, faviconURL string) string {
 // clampDim clamps a CSS dimension to Chrome's max texture size to avoid tiling artifacts.
 // The GPU limit is in physical pixels, so we divide by deviceScaleFactor.
 func clampDim(v int64) int64 {
-	maxCSS := int64(math.Floor(float64(maxPhysicalDim) / *arguments.deviceScaleFactor))
+	maxCSS := int64(math.Floor(float64(maxPhysicalDim) / deviceScaleFactor))
 	return min(v, maxCSS)
 }
 
@@ -651,10 +663,11 @@ func logSettings(profileCacheDir string) {
 	log.Printf("         output: %s", *arguments.outputPath)
 	log.Printf("    profile dir: %s", *arguments.profileDir)
 	log.Printf("       viewport: %dx%d", *arguments.windowWidth, *arguments.windowHeight)
-	log.Printf("   scale factor: %.1f", *arguments.deviceScaleFactor)
+	log.Printf("   scale factor: %.1f", deviceScaleFactor)
 	log.Printf("full screenshot: %v", *arguments.fullScreenshot)
 	log.Printf("       headless: %v", !*arguments.noHeadless)
 	log.Printf("       parallel: %d", *arguments.parallel)
+	log.Printf("   wait seconds: %d", *arguments.waitSeconds)
 	for i, cf := range chromeFlags {
 		log.Printf("  chrome flag[%d]: %s", i, cf)
 	}
