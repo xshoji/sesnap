@@ -13,6 +13,7 @@ A web page screenshot tool with parallel multi-URL capture and lock-free Chrome 
 - **Browser-style address bar** – add a realistic address bar with favicon and URL to the top of screenshots (`-b`), perfect for documentation and presentations
     - <img width="50%" height="50%" alt="sample" src="https://github.com/user-attachments/assets/8e82bfaf-fd89-40e8-9c56-e8f40baef3ee"/>
 
+- **Click / Hover before capture** – click (`-k`) or hover (`-e`) a CSS selector before taking the screenshot, useful for capturing dropdown menus, tooltips, and other interactive states
 - **Custom Chrome flags** – pass arbitrary Chrome flags with `-c`
 - **Idempotent execution** – without `-r`, the cached profile is always freshly copied, ensuring consistent results regardless of previous runs
 
@@ -57,6 +58,8 @@ sesnap -u <URL> -o /tmp/screenshot.png [options]
 | `-w` | `--wait` | `3` | Wait seconds after navigation before capturing |
 | `-W` | `--width` | `1280` | Viewport width |
 | `-H` | `--height` | `860` | Viewport height |
+| `-e` | `--hover` | `""` | Hover over the first element matching the CSS selector before capture |
+| `-k` | `--click` | `""` | Click the first element matching the CSS selector before capture |
 | `-f` | `--full` | `false` | Enable full-page screenshot |
 | `-b` | `--address-bar` | `false` | Add browser-style address bar (favicon + URL) to the top of screenshot |
 | `-d` | `--debug` | `false` | Enable debug mode |
@@ -90,6 +93,15 @@ sesnap -u="https://www.example.com/" -b -o=/tmp/with_bar.png
 
 # Custom Chrome flags
 sesnap -u="https://example.com/" -c="lang=ja" -c="disable-extensions" -o=/tmp/example.png
+
+# Hover over an element before capture (e.g. tooltip)
+sesnap -u="https://example.com/" -e=".tooltip-trigger" -o=/tmp/tooltip.png
+
+# Click an element before capture (e.g. open dropdown menu)
+sesnap -u="https://example.com/" -k=".menu-button" -o=/tmp/menu.png
+
+# Click to open menu, then hover a sub-item
+sesnap -u="https://example.com/" -k=".menu-button" -e=".submenu-item" -o=/tmp/submenu.png
 ```
 
 ### Details of the -p flag and the Google Chrome profile directory

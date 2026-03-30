@@ -25,6 +25,7 @@ import (
 
 	"github.com/chromedp/cdproto/cdp"
 	"github.com/chromedp/cdproto/emulation"
+	"github.com/chromedp/cdproto/input"
 	"github.com/chromedp/cdproto/page"
 	cdpruntime "github.com/chromedp/cdproto/runtime"
 	"github.com/chromedp/cdproto/target"
@@ -66,6 +67,8 @@ var (
 		waitSeconds    *int
 		windowWidth    *int64
 		windowHeight   *int64
+		hoverSelector  *string
+		clickSelector  *string
 		fullScreenshot *bool
 		showAddressBar *bool
 		debug          *bool
@@ -79,6 +82,8 @@ var (
 		defineFlagValue("w", "wait" /*         */, 3 /*                */, "Wait seconds after page navigation before taking screenshot", flag.Int, flag.IntVar),
 		defineFlagValue("W", "width" /*        */, int64(1280) /*      */, "Viewport width (affects page layout, e.g. responsive design). Without -q, this is the output image width", flag.Int64, flag.Int64Var),
 		defineFlagValue("H", "height" /*       */, int64(860) /*       */, "Viewport height (affects page layout, e.g. responsive design). Without -q, this is the output image height", flag.Int64, flag.Int64Var),
+		defineFlagValue("e", "hover" /*        */, "" /*               */, "Hover over the first element matching the CSS selector before capture (e.g. -e=\".tooltip-trigger\")", flag.String, flag.StringVar),
+		defineFlagValue("k", "click" /*        */, "" /*               */, "Click the first element matching the CSS selector before capture (e.g. -k=\".menu-button\")", flag.String, flag.StringVar),
 		defineFlagValue("f", "full" /*         */, false /*            */, "Enable full screenshot mode", flag.Bool, flag.BoolVar),
 		defineFlagValue("b", "address-bar" /*  */, false /*            */, "Add browser-style address bar to the top of screenshot", flag.Bool, flag.BoolVar),
 		defineFlagValue("d", "debug" /*        */, false /*            */, "Enable debug mode", flag.Bool, flag.BoolVar),
@@ -386,6 +391,34 @@ func takeScreenshot(ctx context.Context, url string) ([]byte, error) {
 			return nil
 		}),
 		chromedp.Sleep(time.Duration(*arguments.waitSeconds) * time.Second),
+	}
+
+	// Click action before capture (e.g. open dropdown menu)
+	if *arguments.clickSelector != "" {
+		sel := *arguments.clickSelector
+		tasks = append(tasks,
+			chromedp.WaitVisible(sel, chromedp.ByQuery),
+			chromedp.Click(sel, chromedp.ByQuery),
+			chromedp.Sleep(500*time.Millisecond),
+		)
+	}
+	// Hover action before capture (e.g. trigger tooltip or :hover style)
+	if *arguments.hoverSelector != "" {
+		sel := *arguments.hoverSelector
+		tasks = append(tasks,
+			chromedp.WaitVisible(sel, chromedp.ByQuery),
+			chromedp.ActionFunc(func(ctx context.Context) error {
+				var coords []float64
+				if err := chromedp.Evaluate(
+					`(function(){var r=document.querySelector(`+"`"+sel+"`"+`).getBoundingClientRect();return[r.left+r.width/2,r.top+r.height/2]})()`,
+					&coords,
+				).Do(ctx); err != nil {
+					return err
+				}
+				return input.DispatchMouseEvent(input.MouseMoved, coords[0], coords[1]).Do(ctx)
+			}),
+			chromedp.Sleep(300*time.Millisecond),
+		)
 	}
 
 	var buf []byte
@@ -736,6 +769,8 @@ func logSettings(profileCacheDir string) {
 	log.Printf("         output: %s", *arguments.outputPath)
 	log.Printf("    profile dir: %s", *arguments.profileDir)
 	log.Printf("       viewport: %dx%d", *arguments.windowWidth, *arguments.windowHeight)
+	log.Printf("          hover: %s", *arguments.hoverSelector)
+	log.Printf("          click: %s", *arguments.clickSelector)
 	log.Printf("   scale factor: %.1f", deviceScaleFactor)
 	log.Printf("full screenshot: %v", *arguments.fullScreenshot)
 	log.Printf("       headless: %v", !*arguments.noHeadless)
