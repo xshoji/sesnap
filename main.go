@@ -69,6 +69,7 @@ var (
 		windowHeight   *int64
 		hoverSelector  *string
 		clickSelector  *string
+		expandSelect   *string
 		fullScreenshot *bool
 		showAddressBar *bool
 		debug          *bool
@@ -84,6 +85,7 @@ var (
 		defineFlagValue("H", "height" /*       */, int64(860) /*       */, "Viewport height (affects page layout, e.g. responsive design). Without -q, this is the output image height", flag.Int64, flag.Int64Var),
 		defineFlagValue("e", "hover" /*        */, "" /*               */, "Hover over the first element matching the CSS selector before capture (e.g. -e=\".tooltip-trigger\")", flag.String, flag.StringVar),
 		defineFlagValue("k", "click" /*        */, "" /*               */, "Click the first element matching the CSS selector before capture (e.g. -k=\".menu-button\")", flag.String, flag.StringVar),
+		defineFlagValue("s", "expand-select" /**/, "" /*               */, "Expand <select> elements as HTML dropdown overlay before capture. Use CSS selector or \"*\" for all (e.g. -s=\"select#country\", -s=\"*\")", flag.String, flag.StringVar),
 		defineFlagValue("f", "full" /*         */, false /*            */, "Enable full screenshot mode", flag.Bool, flag.BoolVar),
 		defineFlagValue("b", "address-bar" /*  */, false /*            */, "Add browser-style address bar to the top of screenshot", flag.Bool, flag.BoolVar),
 		defineFlagValue("d", "debug" /*        */, false /*            */, "Enable debug mode", flag.Bool, flag.BoolVar),
@@ -420,6 +422,16 @@ func takeScreenshot(ctx context.Context, url string) ([]byte, error) {
 			chromedp.Sleep(300*time.Millisecond),
 		)
 	}
+	// Expand <select> elements as HTML dropdown overlays
+	if *arguments.expandSelect != "" {
+		sel := *arguments.expandSelect
+		tasks = append(tasks,
+			chromedp.ActionFunc(func(ctx context.Context) error {
+				return expandSelectElements(ctx, sel)
+			}),
+			chromedp.Sleep(100*time.Millisecond),
+		)
+	}
 
 	var buf []byte
 	switch {
@@ -529,6 +541,73 @@ func captureViewport(ctx context.Context, clip *page.Viewport) ([]byte, error) {
 		action = action.WithClip(clip)
 	}
 	return action.Do(ctx)
+}
+
+// expandSelectElements injects JavaScript that replaces <select> elements
+// matching the given CSS selector with expanded HTML dropdown overlays.
+// Use "*" to expand all <select> elements on the page.
+func expandSelectElements(ctx context.Context, selector string) error {
+	jsSelector := selector
+	if selector == "*" {
+		jsSelector = "select"
+	}
+	js := `(function(sel) {
+  var selects = document.querySelectorAll(sel);
+  for (var i = 0; i < selects.length; i++) {
+    var s = selects[i];
+    if (s.tagName !== 'SELECT') continue;
+    var rect = s.getBoundingClientRect();
+    var cs = window.getComputedStyle(s);
+    var selected = s.selectedIndex;
+
+    // Build option list
+    var items = [];
+    for (var j = 0; j < s.options.length; j++) {
+      var opt = s.options[j];
+      items.push({text: opt.text, value: opt.value, selected: j === selected, disabled: opt.disabled});
+    }
+
+    // Create overlay container
+    var overlay = document.createElement('div');
+    overlay.className = '__sesnap-select-overlay';
+    overlay.style.cssText = 'position:absolute;z-index:2147483647;' +
+      'left:' + (rect.left + window.scrollX) + 'px;' +
+      'top:' + (rect.bottom + window.scrollY) + 'px;' +
+      'min-width:' + rect.width + 'px;' +
+      'background:#fff;' +
+      'border:1px solid #c0c0c0;' +
+      'border-radius:4px;' +
+      'box-shadow:0 2px 8px rgba(0,0,0,0.15);' +
+      'padding:1px 0;' +
+      'font-family:' + cs.fontFamily + ';' +
+      'font-size:' + cs.fontSize + ';' +
+      'box-sizing:border-box;' +
+      'max-height:400px;overflow-y:auto;';
+
+    for (var j = 0; j < items.length; j++) {
+      var item = items[j];
+      var div = document.createElement('div');
+      div.textContent = item.text;
+      var bgColor = item.selected ? '#0b57d0' : '#fff';
+      var fgColor = item.selected ? '#fff' : '#202124';
+      if (item.disabled) { fgColor = '#9e9e9e'; }
+      div.style.cssText = 'padding:4px 8px;' +
+        'white-space:nowrap;' +
+        'cursor:default;' +
+        'background:' + bgColor + ';' +
+        'color:' + fgColor + ';';
+      overlay.appendChild(div);
+    }
+
+    // Highlight the select element itself
+    s.style.outline = '2px solid #0b57d0';
+    s.style.outlineOffset = '-1px';
+
+    document.body.appendChild(overlay);
+  }
+})` + "('" + strings.ReplaceAll(jsSelector, "'", "\\'") + "')"
+
+	return chromedp.Evaluate(js, nil).Do(ctx)
 }
 
 // getElementRect returns the bounding client rect of the first element
@@ -771,6 +850,7 @@ func logSettings(profileCacheDir string) {
 	log.Printf("       viewport: %dx%d", *arguments.windowWidth, *arguments.windowHeight)
 	log.Printf("          hover: %s", *arguments.hoverSelector)
 	log.Printf("          click: %s", *arguments.clickSelector)
+	log.Printf("  expand-select: %s", *arguments.expandSelect)
 	log.Printf("   scale factor: %.1f", deviceScaleFactor)
 	log.Printf("full screenshot: %v", *arguments.fullScreenshot)
 	log.Printf("       headless: %v", !*arguments.noHeadless)
