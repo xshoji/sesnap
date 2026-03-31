@@ -59,6 +59,11 @@ This is safe for parallel execution because `SetDeviceMetricsOverride` is scoped
 
 The same approach is applied to `-q`/`--query` (element screenshots): we expand the viewport to contain the target element, then capture with a `clip` rect.
 
+### Pre-capture Actions
+
+- `-k`/`--click` and `-e`/`--hover` perform DOM interactions before capture.
+- `-s`/`--expand-select` injects JavaScript that replaces `<select>` elements with visible HTML dropdown overlays so their options appear in the screenshot. Accepts a CSS selector (e.g. `select#country`) or `"*"` for all `<select>` elements. Implemented in `expandSelectElements()`.
+
 ## Constants
 
 - `maxPhysicalDim = 16384` — Chrome's GPU texture limit in **physical pixels**. The effective CSS pixel limit is `floor(16384 / deviceScaleFactor)` (e.g., 8192 CSS px at scale 2.0). Both `-f`/`--full` and `-q`/`--query` modes clamp to this derived value.

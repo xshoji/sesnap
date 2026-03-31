@@ -60,6 +60,7 @@ sesnap -u <URL> -o /tmp/screenshot.png [options]
 | `-H` | `--height` | `860` | Viewport height |
 | `-e` | `--hover` | `""` | Hover over the first element matching the CSS selector before capture |
 | `-k` | `--click` | `""` | Click the first element matching the CSS selector before capture |
+| `-s` | `--expand-select` | `""` | Expand `<select>` elements as HTML dropdown overlay before capture. Use CSS selector or `"*"` for all |
 | `-f` | `--full` | `false` | Enable full-page screenshot |
 | `-b` | `--address-bar` | `false` | Add browser-style address bar (favicon + URL) to the top of screenshot |
 | `-d` | `--debug` | `false` | Enable debug mode |
@@ -99,6 +100,12 @@ sesnap -u="https://example.com/" -e=".tooltip-trigger" -o=/tmp/tooltip.png
 
 # Click an element before capture (e.g. open dropdown menu)
 sesnap -u="https://example.com/" -k=".menu-button" -o=/tmp/menu.png
+
+# Expand a specific <select> dropdown as HTML overlay
+sesnap -u="https://example.com/" -s="select#country" -o=/tmp/select.png
+
+# Expand all <select> elements
+sesnap -u="https://example.com/" -s="*" -o=/tmp/all_selects.png
 
 # Click to open menu, then hover a sub-item
 sesnap -u="https://example.com/" -k=".menu-button" -e=".submenu-item" -o=/tmp/submenu.png
