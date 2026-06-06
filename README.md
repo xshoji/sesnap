@@ -29,7 +29,7 @@ A web page screenshot tool with parallel multi-URL capture and lock-free Chrome 
 ### Homebrew
 
 ```bash
-brew install xshoji/tap/sesnap
+brew install xshoji/tap/sesnap --cask
 ```
 
 
