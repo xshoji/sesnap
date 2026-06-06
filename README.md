@@ -176,6 +176,9 @@ The server exposes three tools via stdio:
 
 ```bash
 go build -ldflags="-s -w" -trimpath -o sesnap main.go
+
+# Cross-compiling with GoReleaser
+goreleaser build --snapshot --clean
 ```
 
 ### Test
