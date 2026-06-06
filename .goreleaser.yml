@@ -34,7 +34,7 @@ archives:
       - LICENSE*
 snapshot:
   version_template: "{{ .Tag }}-next-{{.ShortCommit}}"
-homebrew:
+homebrew_casks:
   - name: sesnap
     repository:
       owner: xshoji
