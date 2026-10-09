@@ -349,6 +349,9 @@ func TestE2E_SequentialClicks(t *testing.T) {
 
 	browserCtx, shutdown := newBrowserContext("")
 	defer shutdown()
+	if err := chromedp.Run(browserCtx); err != nil {
+		t.Fatal(err)
+	}
 	ctx, cancel := context.WithTimeout(browserCtx, 20*time.Second)
 	defer cancel()
 	p := captureParams{windowWidth: 800, windowHeight: 600, scaleFactor: 1, clickSelectors: []string{"#open", ".item", ".item"}}
