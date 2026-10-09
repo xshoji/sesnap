@@ -59,7 +59,7 @@ sesnap -u <URL> -o /tmp/screenshot.png [options]
 | `-W` | `--width` | `1280` | Viewport width |
 | `-H` | `--height` | `860` | Viewport height |
 | `-e` | `--hover` | `""` | Hover over the first element matching the CSS selector before capture |
-| `-k` | `--click` | `""` | Click the first element matching the CSS selector before capture |
+| `-k` | `--click` | — | Click the first element matching the CSS selector before capture; repeat to click in order |
 | `-s` | `--expand-select` | `""` | Expand `<select>` elements as HTML dropdown overlay before capture. Use CSS selector or `"*"` for all |
 | `-f` | `--full` | `false` | Enable full-page screenshot |
 | `-b` | `--address-bar` | `false` | Add browser-style address bar (favicon + URL) to the top of screenshot |
@@ -102,6 +102,9 @@ sesnap -u="https://example.com/" -e=".tooltip-trigger" -o=/tmp/tooltip.png
 # Click an element before capture (e.g. open dropdown menu)
 sesnap -u="https://example.com/" -k=".menu-button" -o=/tmp/menu.png
 
+# Click a menu button, then a menu item
+sesnap -u="https://example.com/" --click=".menu-button" --click=".menu-item" -o=/tmp/result.png
+
 # Expand a specific <select> dropdown as HTML overlay
 sesnap -u="https://example.com/" -s="select#country" -o=/tmp/select.png
 
@@ -111,6 +114,8 @@ sesnap -u="https://example.com/" -s="*" -o=/tmp/all_selects.png
 # Click to open menu, then hover a sub-item
 sesnap -u="https://example.com/" -k=".menu-button" -e=".submenu-item" -o=/tmp/submenu.png
 ```
+
+Repeated `-k` / `--click` flags run in the order supplied, before hover and select expansion. Each click waits for the target to become visible, then waits 500ms after clicking. This delay does not guarantee that network requests or animations have finished. A failed click stops capture for that URL; the error includes the click number and selector. Commas remain part of the CSS selector, not separators between operations.
 
 ### MCP Server Mode
 
@@ -131,6 +136,14 @@ The server exposes three tools via stdio:
 | `screenshot` | Capture URLs and return images directly as base64 (supports `format: "jpeg"` for token savings) |
 | `screenshot_to_file` | Capture URLs and save to files, returning file paths (no image tokens consumed) |
 | `list_profiles` | List available Chrome profile directories |
+
+Both screenshot tools accept `clicks` for sequential clicks:
+
+```json
+{"urls": ["https://example.com/"], "clicks": [".menu-button", ".menu-item"]}
+```
+
+The existing `click` string remains supported for a single click. Supplying both `click` and `clicks` is an error. An empty `clicks` array performs no clicks.
 
 **AI client configuration example** (e.g. `claude_desktop_config.json`):
 

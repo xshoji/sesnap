@@ -62,6 +62,7 @@ var (
 	commandDescription = "A fast, multi-page screenshot tool that requires only Chrome. Supports profile specification without locking your main browser.\n  Set SESNAP_CACHE_DIR to override the default profile cache directory (~/.sesnap).\n  Device scale factor can be changed via -c \"device-scale-factor=1.0\" (default: 2.0 Retina).\n  Custom DNS resolution via -c \"host-resolver-rules=MAP example.com 127.0.0.1\"."
 	urls               stringSlice
 	chromeFlags        stringSlice
+	clickSelectors     stringSlice
 	deviceScaleFactor  = 2.0
 	arguments          = struct {
 		outputPath     *string
@@ -71,7 +72,6 @@ var (
 		windowWidth    *int64
 		windowHeight   *int64
 		hoverSelector  *string
-		clickSelector  *string
 		expandSelect   *string
 		fullScreenshot *bool
 		showAddressBar *bool
@@ -88,7 +88,6 @@ var (
 		defineFlagValue("W", "width" /*        */, int64(1280) /*      */, "Viewport width (affects page layout, e.g. responsive design). Without -q, this is the output image width", flag.Int64, flag.Int64Var),
 		defineFlagValue("H", "height" /*       */, int64(860) /*       */, "Viewport height (affects page layout, e.g. responsive design). Without -q, this is the output image height", flag.Int64, flag.Int64Var),
 		defineFlagValue("e", "hover" /*        */, "" /*               */, "Hover over the first element matching the CSS selector before capture (e.g. -e=\".tooltip-trigger\")", flag.String, flag.StringVar),
-		defineFlagValue("k", "click" /*        */, "" /*               */, "Click the first element matching the CSS selector before capture (e.g. -k=\".menu-button\")", flag.String, flag.StringVar),
 		defineFlagValue("s", "expand-select" /**/, "" /*               */, "Expand <select> elements as HTML dropdown overlay before capture. Use CSS selector or \"*\" for all (e.g. -s=\"select#country\", -s=\"*\")", flag.String, flag.StringVar),
 		defineFlagValue("f", "full" /*         */, false /*            */, "Enable full screenshot mode", flag.Bool, flag.BoolVar),
 		defineFlagValue("b", "address-bar" /*  */, false /*            */, "Add browser-style address bar to the top of screenshot", flag.Bool, flag.BoolVar),
@@ -106,7 +105,7 @@ type captureParams struct {
 	windowHeight   int64
 	waitSeconds    int
 	querySelector  string
-	clickSelector  string
+	clickSelectors []string
 	hoverSelector  string
 	expandSelect   string
 	fullScreenshot bool
@@ -120,7 +119,7 @@ func captureParamsFromArgs() captureParams {
 		windowHeight:   *arguments.windowHeight,
 		waitSeconds:    *arguments.waitSeconds,
 		querySelector:  *arguments.querySelector,
-		clickSelector:  *arguments.clickSelector,
+		clickSelectors: clickSelectors,
 		hoverSelector:  *arguments.hoverSelector,
 		expandSelect:   *arguments.expandSelect,
 		fullScreenshot: *arguments.fullScreenshot,
@@ -132,6 +131,7 @@ func captureParamsFromArgs() captureParams {
 func init() {
 	defineFlagSlice("u", "url", Req+"URL (can be specified multiple times, e.g. -u \"https://xxxx/\" -u \"https://yyyy/\")", &urls)
 	defineFlagSlice("c", "chrome-flag", "Extra Chrome flag as key=value (can be specified multiple times, e.g. -c \"lang=ja\" -c \"disable-extensions\").", &chromeFlags)
+	defineFlagSlice("k", "click", "Click the first matching element before capture; repeat to click selectors in order (e.g. -k .menu-button -k .menu-item)", &clickSelectors)
 	flag.Usage = customUsage(commandDescription)
 }
 
@@ -434,13 +434,23 @@ func takeScreenshot(ctx context.Context, url string, p captureParams) ([]byte, e
 		chromedp.Sleep(time.Duration(p.waitSeconds) * time.Second),
 	}
 
-	// Click action before capture (e.g. open dropdown menu)
-	if p.clickSelector != "" {
-		sel := p.clickSelector
+	// Wait for each target so earlier clicks can reveal later targets.
+	for i, sel := range p.clickSelectors {
+		if sel == "" {
+			continue
+		}
 		tasks = append(tasks,
-			chromedp.WaitVisible(sel, chromedp.ByQuery),
-			chromedp.Click(sel, chromedp.ByQuery),
-			chromedp.Sleep(500*time.Millisecond),
+			chromedp.ActionFunc(func(ctx context.Context) error {
+				err := chromedp.Tasks{
+					chromedp.WaitVisible(sel, chromedp.ByQuery),
+					chromedp.Click(sel, chromedp.ByQuery),
+					chromedp.Sleep(500 * time.Millisecond),
+				}.Do(ctx)
+				if err != nil {
+					return fmt.Errorf("click %d (%q): %w", i+1, sel, err)
+				}
+				return nil
+			}),
 		)
 	}
 	// Hover action before capture (e.g. trigger tooltip or :hover style)
@@ -888,7 +898,7 @@ func logSettings(profileCacheDir string) {
 	log.Printf("    profile dir: %s", *arguments.profileDir)
 	log.Printf("       viewport: %dx%d", *arguments.windowWidth, *arguments.windowHeight)
 	log.Printf("          hover: %s", *arguments.hoverSelector)
-	log.Printf("          click: %s", *arguments.clickSelector)
+	log.Printf("         clicks: %v", clickSelectors)
 	log.Printf("  expand-select: %s", *arguments.expandSelect)
 	log.Printf("   scale factor: %.1f", deviceScaleFactor)
 	log.Printf("full screenshot: %v", *arguments.fullScreenshot)
@@ -1026,6 +1036,7 @@ func runMCPServer() {
 			mcp.WithString("query", mcp.Description("CSS selector to screenshot a specific element")),
 			mcp.WithNumber("wait", mcp.Description("Wait seconds after navigation before capture (default: 3)")),
 			mcp.WithString("click", mcp.Description("Click the first element matching this CSS selector before capture")),
+			mcp.WithArray("clicks", mcp.Description("CSS selectors to click in order before capture; cannot be combined with click"), mcp.WithStringItems()),
 			mcp.WithString("hover", mcp.Description("Hover over the first element matching this CSS selector before capture")),
 			mcp.WithString("expand_select", mcp.Description("Expand <select> elements as HTML overlay. Use CSS selector or \"*\" for all")),
 			mcp.WithBoolean("address_bar", mcp.Description("Add browser-style address bar to screenshot (default: false)")),
@@ -1053,6 +1064,7 @@ func runMCPServer() {
 			mcp.WithString("query", mcp.Description("CSS selector to screenshot a specific element")),
 			mcp.WithNumber("wait", mcp.Description("Wait seconds after navigation before capture (default: 3)")),
 			mcp.WithString("click", mcp.Description("Click the first element matching this CSS selector before capture")),
+			mcp.WithArray("clicks", mcp.Description("CSS selectors to click in order before capture; cannot be combined with click"), mcp.WithStringItems()),
 			mcp.WithString("hover", mcp.Description("Hover over the first element matching this CSS selector before capture")),
 			mcp.WithString("expand_select", mcp.Description("Expand <select> elements as HTML overlay. Use CSS selector or \"*\" for all")),
 			mcp.WithBoolean("address_bar", mcp.Description("Add browser-style address bar to screenshot (default: false)")),
@@ -1088,19 +1100,41 @@ func runMCPServer() {
 }
 
 // mcpCaptureParams builds captureParams from MCP tool request arguments.
-func mcpCaptureParams(request mcp.CallToolRequest) captureParams {
+func mcpCaptureParams(request mcp.CallToolRequest) (captureParams, error) {
+	args := request.GetArguments()
+	_, hasClick := args["click"]
+	_, hasClicks := args["clicks"]
+	if hasClick && hasClicks {
+		return captureParams{}, fmt.Errorf("click and clicks cannot be specified together")
+	}
+
+	var selectors []string
+	if hasClicks {
+		var err error
+		selectors, err = request.RequireStringSlice("clicks")
+		if err != nil {
+			return captureParams{}, err
+		}
+	} else if hasClick {
+		sel, err := request.RequireString("click")
+		if err != nil {
+			return captureParams{}, err
+		}
+		selectors = []string{sel}
+	}
+
 	return captureParams{
 		windowWidth:    int64(request.GetFloat("width", 1280)),
 		windowHeight:   int64(request.GetFloat("height", 860)),
 		waitSeconds:    int(request.GetFloat("wait", 3)),
 		querySelector:  request.GetString("query", ""),
-		clickSelector:  request.GetString("click", ""),
+		clickSelectors: selectors,
 		hoverSelector:  request.GetString("hover", ""),
 		expandSelect:   request.GetString("expand_select", ""),
 		fullScreenshot: request.GetBool("full", false),
 		showAddressBar: request.GetBool("address_bar", false),
 		scaleFactor:    request.GetFloat("scale", 1.0),
-	}
+	}, nil
 }
 
 // mcpScreenshotHandler returns a tool handler that captures screenshots.
@@ -1112,7 +1146,10 @@ func mcpScreenshotHandler(browserCtx context.Context, sem chan struct{}, toFile 
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 
-		p := mcpCaptureParams(request)
+		p, err := mcpCaptureParams(request)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
 		format := request.GetString("format", "png")
 		quality := int(request.GetFloat("quality", 80))
 
