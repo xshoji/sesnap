@@ -574,10 +574,12 @@ func TestE2E_CLIFailureCleanup(t *testing.T) {
 	setURLs("http://127.0.0.1:0", srv.URL)
 	wait, parallel := 0, 2
 	arguments.waitSeconds, arguments.parallel = &wait, &parallel
-	chromeFlags, clickSelectors = nil, nil
+	clickSelectors = nil
 	deviceScaleFactor = 1
 	if err := run(context.Background()); err == nil {
 		t.Fatal("one failed URL must make CLI fail")
+	} else if !strings.Contains(err.Error(), urls[0]) {
+		t.Fatalf("expected URL capture failure, got: %v", err)
 	}
 	if _, err := os.Stat(strings.TrimSuffix(output, ".png") + "_002.png"); err != nil {
 		t.Fatalf("successful URL was not saved: %v", err)

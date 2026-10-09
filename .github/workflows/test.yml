@@ -22,4 +22,4 @@ jobs:
       - name: Run tests
         env:
           SESNAP_E2E: '1'
-        run: go test -v ./...
+        run: go test -v ./... -args -c no-sandbox
