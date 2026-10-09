@@ -3,7 +3,10 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"html"
@@ -48,14 +51,19 @@ func (s *stringSlice) Set(v string) error {
 var version = "dev"
 
 const (
-	Req        = "\x1b[33m(required)\x1b[0m "
-	UsageDummy = "########"
+	Req                  = "\x1b[33m(required)\x1b[0m "
+	UsageDummy           = "########"
+	defaultWidth   int64 = 1280
+	defaultHeight  int64 = 860
+	defaultWait          = 3
+	defaultQuality       = 80
 	// maxPhysicalDim is Chrome's GPU texture limit in physical pixels.
 	// The actual CSS pixel limit depends on deviceScaleFactor.
-	maxPhysicalDim int64 = 16384
-	// Shutdown timeout constants for signal handling
-	cleanupTimeout         = 10 * time.Second
-	closeAllTargetsTimeout = 5 * time.Second
+	maxPhysicalDim    int64 = 16384
+	cleanupTimeout          = 10 * time.Second
+	navigationTimeout       = 10 * time.Second
+	captureTimeout          = 60 * time.Second
+	maxWaitSeconds          = int64(math.MaxInt64 / int64(time.Second))
 )
 
 var (
@@ -80,13 +88,14 @@ var (
 		reUseProfile   *bool
 		parallel       *int
 		mcpMode        *bool
+		timeoutSeconds *int
 	}{
 		defineFlagValue("o", "output" /*       */, "" /*               */, Req+"Output path of screenshot (with multiple URLs, auto-numbered: <base>_001.png, _002.png, ...)", flag.String, flag.StringVar),
 		defineFlagValue("q", "query" /*        */, "" /*               */, "Query selector. Screenshot the first matching element. ( e.g. -q=\".className#id\" )", flag.String, flag.StringVar),
 		defineFlagValue("p", "profile" /*      */, "" /*               */, "Chrome profile directory to copy. (e.g. -p=\"~/Library/Application Support/Google/Chrome/Default\").", flag.String, flag.StringVar),
-		defineFlagValue("w", "wait" /*         */, 3 /*                */, "Wait seconds after page navigation before taking screenshot", flag.Int, flag.IntVar),
-		defineFlagValue("W", "width" /*        */, int64(1280) /*      */, "Viewport width (affects page layout, e.g. responsive design). Without -q, this is the output image width", flag.Int64, flag.Int64Var),
-		defineFlagValue("H", "height" /*       */, int64(860) /*       */, "Viewport height (affects page layout, e.g. responsive design). Without -q, this is the output image height", flag.Int64, flag.Int64Var),
+		defineFlagValue("w", "wait" /*         */, defaultWait /*      */, "Wait seconds after page navigation before taking screenshot", flag.Int, flag.IntVar),
+		defineFlagValue("W", "width" /*        */, defaultWidth /*     */, "Viewport width (affects page layout, e.g. responsive design). Without -q, this is the output image width", flag.Int64, flag.Int64Var),
+		defineFlagValue("H", "height" /*       */, defaultHeight /*    */, "Viewport height (affects page layout, e.g. responsive design). Without -q, this is the output image height", flag.Int64, flag.Int64Var),
 		defineFlagValue("e", "hover" /*        */, "" /*               */, "Hover over the first element matching the CSS selector before capture (e.g. -e=\".tooltip-trigger\")", flag.String, flag.StringVar),
 		defineFlagValue("s", "expand-select" /**/, "" /*               */, "Expand <select> elements as HTML dropdown overlay before capture. Use CSS selector or \"*\" for all (e.g. -s=\"select#country\", -s=\"*\")", flag.String, flag.StringVar),
 		defineFlagValue("f", "full" /*         */, false /*            */, "Enable full screenshot mode", flag.Bool, flag.BoolVar),
@@ -96,6 +105,7 @@ var (
 		defineFlagValue("r", "reuse" /*        */, false /*            */, "Reuse cached profile (do not delete after execution)", flag.Bool, flag.BoolVar),
 		defineFlagValue("t", "parallel" /*     */, runtime.NumCPU() /* */, "Max number of parallel tabs for screenshot capture", flag.Int, flag.IntVar),
 		defineFlagValue("m", "mcp" /*          */, false /*            */, "Run as MCP (Model Context Protocol) server over stdio", flag.Bool, flag.BoolVar),
+		defineFlagValue("T", "timeout", int(captureTimeout/time.Second), "Timeout seconds per URL, including navigation and interactions", flag.Int, flag.IntVar),
 	}
 )
 
@@ -111,21 +121,51 @@ type captureParams struct {
 	fullScreenshot bool
 	showAddressBar bool
 	scaleFactor    float64
+	timeout        time.Duration
 }
 
 func captureParamsFromArgs() captureParams {
+	// Empty flags retain the legacy no-click behavior.
+	var selectors []string
+	for _, sel := range clickSelectors {
+		if sel != "" {
+			selectors = append(selectors, sel)
+		}
+	}
 	return captureParams{
 		windowWidth:    *arguments.windowWidth,
 		windowHeight:   *arguments.windowHeight,
 		waitSeconds:    *arguments.waitSeconds,
 		querySelector:  *arguments.querySelector,
-		clickSelectors: clickSelectors,
+		clickSelectors: selectors,
 		hoverSelector:  *arguments.hoverSelector,
 		expandSelect:   *arguments.expandSelect,
 		fullScreenshot: *arguments.fullScreenshot,
 		showAddressBar: *arguments.showAddressBar,
 		scaleFactor:    deviceScaleFactor,
+		timeout:        time.Duration(*arguments.timeoutSeconds) * time.Second,
 	}
+}
+
+func (p captureParams) validate() error {
+	if math.IsNaN(p.scaleFactor) || math.IsInf(p.scaleFactor, 0) || p.scaleFactor <= 0 {
+		return fmt.Errorf("scale must be finite and greater than zero")
+	}
+	if p.windowWidth < 1 || p.windowHeight < 1 ||
+		p.windowWidth > maxPhysicalDim || p.windowHeight > maxPhysicalDim ||
+		float64(p.windowWidth)*p.scaleFactor > float64(maxPhysicalDim) ||
+		float64(p.windowHeight)*p.scaleFactor > float64(maxPhysicalDim) {
+		return fmt.Errorf("viewport dimensions must be positive and fit within %d CSS and physical pixels", maxPhysicalDim)
+	}
+	if p.waitSeconds < 0 || int64(p.waitSeconds) > maxWaitSeconds {
+		return fmt.Errorf("wait is out of range")
+	}
+	for i, sel := range p.clickSelectors {
+		if strings.TrimSpace(sel) == "" {
+			return fmt.Errorf("click %d: selector must not be empty", i+1)
+		}
+	}
+	return nil
 }
 
 func init() {
@@ -137,133 +177,130 @@ func init() {
 
 func main() {
 	flag.Parse()
-	if *arguments.mcpMode {
-		runMCPServer()
-		return
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	// Restore default signal handling after the first signal; a second forces exit.
+	stopOnSignal := context.AfterFunc(ctx, stop)
+	err := run(ctx)
+	stopOnSignal()
+	stop()
+	if err != nil {
+		log.Print(err)
+		os.Exit(1)
 	}
-	if len(urls) == 0 || *arguments.outputPath == "" {
-		log.Println("Error: -u:URLs and -o:output-path are required.")
-		flag.Usage()
-		os.Exit(0)
-	}
+}
 
-	// Parse device-scale-factor from -c flags (e.g. -c "device-scale-factor=1.5")
+// run owns the browser and profile for both CLI and MCP execution.
+func run(ctx context.Context) error {
+	if *arguments.parallel < 1 {
+		return fmt.Errorf("parallel must be at least 1")
+	}
+	if *arguments.timeoutSeconds < 1 || int64(*arguments.timeoutSeconds) > maxWaitSeconds {
+		return fmt.Errorf("timeout is out of range")
+	}
 	for _, cf := range chromeFlags {
 		k, v, _ := strings.Cut(cf, "=")
-		if k == "device-scale-factor" && v != "" {
-			if f, err := strconv.ParseFloat(v, 64); err == nil {
-				deviceScaleFactor = f
-			} else {
-				log.Fatalf("invalid device-scale-factor value: %s", v)
+		if k == "device-scale-factor" {
+			f, err := strconv.ParseFloat(v, 64)
+			if err != nil {
+				return fmt.Errorf("invalid device-scale-factor: %q", v)
 			}
+			deviceScaleFactor = f
 		}
 	}
-
-	// --- 1. Profile cache setup ---
-	profileCacheDir := setupProfileCache()
-
-	// --- 2. Browser context ---
-	browserCtx, shutdownBrowser := newBrowserContext(profileCacheDir)
-	cleanup := func() {
-		shutdownBrowser()
-		cleanupProfileCache(profileCacheDir)
-	}
-	defer cleanup()
-
-	// Handle interrupt signals
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
-	go func() {
-		sig := <-sigCh
-		log.Printf("signal received: %v, shutting down...", sig)
-		done := make(chan struct{})
-		go func() {
-			cleanup()
-			close(done)
-		}()
-		select {
-		case <-done:
-			os.Exit(0)
-		case <-time.After(cleanupTimeout):
-			log.Printf("cleanup timed out, forcing exit")
-			os.Exit(1)
-		case sig = <-sigCh:
-			log.Printf("second signal received: %v, forcing exit", sig)
-			os.Exit(1)
-		}
-	}()
-
-	// --- 3. Start browser (must be done before parallel tabs) ---
-	if err := chromedp.Run(browserCtx); err != nil {
-		log.Fatal(err)
-	}
-
-	// --- 4. Log settings ---
-	logSettings(profileCacheDir)
-
-	// --- 5. Take screenshots ---
 	params := captureParamsFromArgs()
-	if len(urls) == 1 {
-		// Single URL: use the browser's initial tab directly
-		log.Printf("[1/1] capturing: %s", urls[0])
-		buf, err := takeScreenshot(browserCtx, urls[0], params)
-		if err != nil {
-			log.Fatalf("capture %s: %v", urls[0], err)
+	if err := params.validate(); err != nil {
+		return err
+	}
+	if !*arguments.mcpMode {
+		if len(urls) == 0 || strings.TrimSpace(*arguments.outputPath) == "" {
+			flag.Usage()
+			return fmt.Errorf("-u and -o are required")
 		}
-		outPath := outputPath(0)
-		if dir := filepath.Dir(outPath); dir != "." {
-			if err := os.MkdirAll(dir, 0755); err != nil {
-				log.Fatalf("create dir %s: %v", dir, err)
-			}
-		}
-		if err := os.WriteFile(outPath, buf, 0644); err != nil {
-			log.Fatalf("write %s: %v", outPath, err)
-		}
-		log.Printf("saved screenshot: %s", outPath)
-	} else {
-		// Multiple URLs: parallel capture with separate tabs
-		type result struct {
-			index int
-			err   error
-		}
-		results := make(chan result, len(urls))
-		sem := make(chan struct{}, *arguments.parallel)
-		for i, u := range urls {
-			go func(i int, u string) {
-				sem <- struct{}{}
-				defer func() { <-sem }()
-
-				tabCtx, tabCancel := chromedp.NewContext(browserCtx)
-				defer tabCancel()
-
-				log.Printf("[%d/%d] capturing: %s", i+1, len(urls), u)
-				buf, err := takeScreenshot(tabCtx, u, params)
-				if err != nil {
-					results <- result{i, fmt.Errorf("capture %s: %w", u, err)}
-					return
-				}
-
-				outPath := outputPath(i)
-				if dir := filepath.Dir(outPath); dir != "." {
-					if err := os.MkdirAll(dir, 0755); err != nil {
-						results <- result{i, fmt.Errorf("create dir %s: %w", dir, err)}
-						return
-					}
-				}
-				if err := os.WriteFile(outPath, buf, 0644); err != nil {
-					results <- result{i, fmt.Errorf("write %s: %w", outPath, err)}
-					return
-				}
-				log.Printf("saved screenshot: %s", outPath)
-				results <- result{i, nil}
-			}(i, u)
-		}
-		for range urls {
-			if r := <-results; r.err != nil {
-				log.Fatal(r.err)
+		for _, u := range urls {
+			if strings.TrimSpace(u) == "" {
+				return fmt.Errorf("URLs must not be empty")
 			}
 		}
 	}
+
+	profileCacheDir, err := setupProfileCache()
+	if err != nil {
+		return err
+	}
+	defer cleanupProfileCache(profileCacheDir)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	browserCtx, shutdown := newBrowserContext(profileCacheDir)
+	defer shutdown()
+	// Allocate on the root context; cancelling an allocation context kills Chrome.
+	if err := chromedp.Run(browserCtx); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	sem := make(chan struct{}, *arguments.parallel)
+	if *arguments.mcpMode {
+		return runMCPServer(ctx, browserCtx, sem)
+	}
+	logSettings(profileCacheDir)
+	results := make(chan error, len(urls))
+	for i, u := range urls {
+		go func() {
+			log.Printf("[%d/%d] capturing: %s", i+1, len(urls), u)
+			buf, err := captureTab(ctx, browserCtx, sem, u, params)
+			if err == nil {
+				err = saveImage(outputPath(i), buf)
+			}
+			if err != nil {
+				err = fmt.Errorf("capture %s: %w", u, err)
+			}
+			results <- err
+		}()
+	}
+	var failures []error
+	for range urls {
+		if err := <-results; err != nil {
+			failures = append(failures, err)
+		}
+	}
+	return errors.Join(failures...)
+}
+
+func saveImage(path string, buf []byte) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return fmt.Errorf("create output directory: %w", err)
+	}
+	if err := os.WriteFile(path, buf, 0644); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+	log.Printf("saved screenshot: %s", path)
+	return nil
+}
+
+// captureTab gives every URL its own tab and propagates request cancellation.
+func captureTab(ctx, browserCtx context.Context, sem chan struct{}, url string, p captureParams) ([]byte, error) {
+	select {
+	case sem <- struct{}{}:
+		defer func() { <-sem }()
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	tabCtx, tabCancel := chromedp.NewContext(browserCtx)
+	defer tabCancel()
+	timeout := p.timeout
+	if timeout == 0 {
+		timeout = captureTimeout
+	}
+	tabCtx, cancel := context.WithTimeout(tabCtx, timeout)
+	defer cancel()
+	stop := context.AfterFunc(ctx, cancel)
+	defer stop()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return takeScreenshot(tabCtx, url, p)
 }
 
 // outputPath returns the output file path for the i-th URL.
@@ -277,52 +314,68 @@ func outputPath(index int) string {
 	return fmt.Sprintf("%s_%03d%s", base, index+1, ext)
 }
 
-// setupProfileCache copies the specified Chrome profile to a cache directory.
-// Returns the cache directory path to clean up later (empty string if no profile specified).
-//
-// With -r (reuse): uses a persistent directory under chromeProfileCacheRoot()
-// Without -r:      uses a temporary directory (os.MkdirTemp), deleted on exit
-//
-// Cache structure:
-//
-//	<cacheRoot>/userdata-<profileName>/               <- user-data-dir
-//	<cacheRoot>/userdata-<profileName>/<profileName>/ <- copied profile data
-func setupProfileCache() string {
+// setupProfileCache publishes only complete copies and locks reusable caches.
+func setupProfileCache() (cacheDir string, err error) {
 	if *arguments.profileDir == "" {
-		return ""
+		return "", nil
 	}
-
-	profileName := filepath.Base(*arguments.profileDir)
-
-	if *arguments.reUseProfile {
-		// Reuse mode: persistent directory under home (or env var)
-		userDataDir := filepath.Join(chromeProfileCacheRoot(), "userdata-"+profileName)
-		profileSubDir := filepath.Join(userDataDir, profileName)
-		if _, err := os.Stat(profileSubDir); err == nil {
-			log.Printf("reuse cached profile: %s", profileSubDir)
-			return userDataDir
-		}
-		if err := os.MkdirAll(userDataDir, 0700); err != nil {
-			log.Fatalf("failed to create cache dir: %v", err)
-		}
-		if err := os.CopyFS(profileSubDir, os.DirFS(*arguments.profileDir)); err != nil {
-			log.Fatalf("failed to copy profile: %v", err)
-		}
-		log.Printf("copied profile: %s -> %s", *arguments.profileDir, profileSubDir)
-		return userDataDir
-	}
-
-	// Non-reuse mode: use a temporary directory
-	userDataDir, err := os.MkdirTemp("", "sesnap-userdata-")
+	source, err := filepath.Abs(*arguments.profileDir)
 	if err != nil {
-		log.Fatalf("failed to create temp dir: %v", err)
+		return "", err
 	}
-	profileSubDir := filepath.Join(userDataDir, profileName)
-	if err := os.CopyFS(profileSubDir, os.DirFS(*arguments.profileDir)); err != nil {
-		log.Fatalf("failed to copy profile: %v", err)
+	source, err = filepath.EvalSymlinks(source)
+	if err != nil {
+		return "", err
 	}
-	log.Printf("copied profile: %s -> %s", *arguments.profileDir, profileSubDir)
-	return userDataDir
+	*arguments.profileDir = source
+	profileName := filepath.Base(source)
+	root := ""
+	if *arguments.reUseProfile {
+		root, err = chromeProfileCacheRoot()
+		if err != nil {
+			return "", err
+		}
+		if err := os.MkdirAll(root, 0700); err != nil {
+			return "", err
+		}
+		cacheDir = filepath.Join(root, fmt.Sprintf("userdata-%x", sha256.Sum256([]byte(source))))
+		lockPath := cacheDir + ".lock"
+		// ponytail: crash locks require manual removal; never steal a live cache.
+		if err := os.Mkdir(lockPath, 0700); err != nil {
+			return "", fmt.Errorf("cannot lock profile cache %s (in use or stale lock): %w", lockPath, err)
+		}
+		defer func() {
+			if err != nil {
+				os.Remove(lockPath)
+			}
+		}()
+		info, statErr := os.Stat(filepath.Join(cacheDir, profileName))
+		if statErr == nil && info.IsDir() {
+			return cacheDir, nil
+		}
+		if !errors.Is(statErr, os.ErrNotExist) {
+			return "", fmt.Errorf("invalid cached profile: %v", statErr)
+		}
+	}
+	staging, err := os.MkdirTemp(root, "sesnap-userdata-")
+	if err != nil {
+		return "", err
+	}
+	defer func() {
+		if err != nil || *arguments.reUseProfile {
+			os.RemoveAll(staging)
+		}
+	}()
+	if err := os.CopyFS(filepath.Join(staging, profileName), os.DirFS(source)); err != nil {
+		return "", fmt.Errorf("copy profile: %w", err)
+	}
+	if *arguments.reUseProfile {
+		if err := os.Rename(staging, cacheDir); err != nil {
+			return "", err
+		}
+		return cacheDir, nil
+	}
+	return staging, nil
 }
 
 // newBrowserContext creates a chromedp browser context with the configured options.
@@ -348,7 +401,6 @@ func newBrowserContext(userDataDir string) (context.Context, func()) {
 
 	if userDataDir != "" {
 		profileName := filepath.Base(*arguments.profileDir)
-		removeStaleChromeLocks(userDataDir)
 		opts = append(opts,
 			chromedp.Flag("user-data-dir", userDataDir),
 			chromedp.Flag("profile-directory", profileName),
@@ -371,23 +423,13 @@ func newBrowserContext(userDataDir string) (context.Context, func()) {
 	var once sync.Once
 	shutdown := func() {
 		once.Do(func() {
-			// Close all tabs via CDP before shutting down to keep the session clean.
-			// Use a short timeout to avoid blocking if Chrome is unresponsive.
-			closeCtx, closeCancel := context.WithTimeout(context.Background(), closeAllTargetsTimeout)
+			closeCtx, closeCancel := context.WithTimeout(browserCtx, cleanupTimeout)
 			defer closeCancel()
-			closeDone := make(chan struct{})
-			go func() {
-				closeAllTargets(browserCtx)
-				close(closeDone)
-			}()
-			select {
-			case <-closeDone:
-			case <-closeCtx.Done():
-				log.Printf("closeAllTargets timed out, forcing shutdown")
-			}
-			// Gracefully close Chrome via CDP to avoid "didn't shut down correctly" warning
-			if err := chromedp.Cancel(browserCtx); err != nil {
-				log.Printf("graceful browser close failed: %v", err)
+			if c := chromedp.FromContext(browserCtx); c.Browser != nil {
+				closeAllTargets(closeCtx)
+				if err := chromedp.Cancel(closeCtx); err != nil {
+					log.Printf("graceful browser close failed: %v", err)
+				}
 			}
 			browserCancel()
 			allocCancel()
@@ -401,6 +443,9 @@ func newBrowserContext(userDataDir string) (context.Context, func()) {
 // All chromedp actions run in a single Run call to avoid race conditions
 // when multiple tabs operate concurrently.
 func takeScreenshot(ctx context.Context, url string, p captureParams) ([]byte, error) {
+	if err := p.validate(); err != nil {
+		return nil, err
+	}
 	// Build and execute all tasks in one Run call
 	tasks := chromedp.Tasks{
 		emulation.SetDeviceMetricsOverride(
@@ -409,36 +454,12 @@ func takeScreenshot(ctx context.Context, url string, p captureParams) ([]byte, e
 			p.scaleFactor,
 			false,
 		),
-		// Use page.Navigate directly to avoid hanging on pages
-		// that never fire the load event within a constrained viewport.
-		chromedp.ActionFunc(func(ctx context.Context) error {
-			_, _, _, _, err := page.Navigate(url).Do(ctx)
-			return err
-		}),
-		// Wait for navigation to actually commit before starting the user-specified delay.
-		// Raw page.Navigate returns immediately; without this check, parallel tabs
-		// may still be on about:blank when the screenshot fires.
-		chromedp.ActionFunc(func(ctx context.Context) error {
-			for i := 0; i < 100; i++ {
-				var readyState string
-				if err := chromedp.Evaluate(`document.readyState`, &readyState).Do(ctx); err != nil {
-					return err
-				}
-				if readyState == "interactive" || readyState == "complete" {
-					return nil
-				}
-				time.Sleep(100 * time.Millisecond)
-			}
-			return nil
-		}),
+		chromedp.ActionFunc(func(ctx context.Context) error { return navigate(ctx, url) }),
 		chromedp.Sleep(time.Duration(p.waitSeconds) * time.Second),
 	}
 
 	// Wait for each target so earlier clicks can reveal later targets.
 	for i, sel := range p.clickSelectors {
-		if sel == "" {
-			continue
-		}
 		tasks = append(tasks,
 			chromedp.ActionFunc(func(ctx context.Context) error {
 				err := chromedp.Tasks{
@@ -460,8 +481,9 @@ func takeScreenshot(ctx context.Context, url string, p captureParams) ([]byte, e
 			chromedp.WaitVisible(sel, chromedp.ByQuery),
 			chromedp.ActionFunc(func(ctx context.Context) error {
 				var coords []float64
+				literal, _ := json.Marshal(sel)
 				if err := chromedp.Evaluate(
-					`(function(){var r=document.querySelector(`+"`"+sel+"`"+`).getBoundingClientRect();return[r.left+r.width/2,r.top+r.height/2]})()`,
+					`(function(){var r=document.querySelector(`+string(literal)+`).getBoundingClientRect();return[r.left+r.width/2,r.top+r.height/2]})()`,
 					&coords,
 				).Do(ctx); err != nil {
 					return err
@@ -530,6 +552,37 @@ func takeScreenshot(ctx context.Context, url string, p captureParams) ([]byte, e
 	return buf, nil
 }
 
+// navigate waits for this loader to commit and parse, not for all resources to load.
+func navigate(ctx context.Context, url string) error {
+	ctx, cancel := context.WithTimeout(ctx, navigationTimeout)
+	defer cancel()
+	frameID, loaderID, errorText, _, err := page.Navigate(url).Do(ctx)
+	if err != nil {
+		return err
+	}
+	if errorText != "" {
+		return fmt.Errorf("navigate %s: %s", url, errorText)
+	}
+	for {
+		tree, err := page.GetFrameTree().Do(ctx)
+		if err != nil {
+			return err
+		}
+		if tree.Frame.ID == frameID && (loaderID == "" || tree.Frame.LoaderID == loaderID) {
+			var state string
+			if err := chromedp.Evaluate(`document.readyState`, &state).Do(ctx); err != nil {
+				return err
+			}
+			if state == "interactive" || state == "complete" {
+				return nil
+			}
+		}
+		if err := chromedp.Sleep(100 * time.Millisecond).Do(ctx); err != nil {
+			return fmt.Errorf("wait for navigation %s: %w", url, err)
+		}
+	}
+}
+
 // captureFullPage resizes the viewport to the full page dimensions and takes
 // a normal viewport screenshot. This avoids captureBeyondViewport which is
 // unreliable when multiple tabs capture concurrently.
@@ -560,6 +613,10 @@ func captureElement(ctx context.Context, selector string, p captureParams) ([]by
 	if err != nil {
 		return nil, err
 	}
+	// Reset scroll so document-coordinate clips stay within the resized viewport.
+	if err := chromedp.Evaluate(`window.scrollTo({left:0,top:0,behavior:'instant'})`, nil).Do(ctx); err != nil {
+		return nil, err
+	}
 	// Expand viewport so the element is fully visible
 	needW := max(p.windowWidth, int64(math.Ceil(x+w)))
 	needH := max(p.windowHeight, int64(math.Ceil(y+h)))
@@ -574,10 +631,15 @@ func captureElement(ctx context.Context, selector string, p captureParams) ([]by
 		return nil, err
 	}
 	rx, ry := math.Round(x), math.Round(y)
+	width := min(math.Round(w+x-rx), float64(clampDim(needW, p.scaleFactor))-rx)
+	height := min(math.Round(h+y-ry), float64(clampDim(needH, p.scaleFactor))-ry)
+	if rx < 0 || ry < 0 || width <= 0 || height <= 0 {
+		return nil, fmt.Errorf("element is outside the capture viewport")
+	}
 	return captureViewport(ctx, &page.Viewport{
 		X: rx, Y: ry,
-		Width:  math.Round(w + x - rx),
-		Height: math.Round(h + y - ry),
+		Width:  width,
+		Height: height,
 		Scale:  1,
 	})
 }
@@ -585,7 +647,7 @@ func captureElement(ctx context.Context, selector string, p captureParams) ([]by
 // captureViewport takes a PNG screenshot of the current viewport.
 // If clip is non-nil, only the specified region is captured.
 func captureViewport(ctx context.Context, clip *page.Viewport) ([]byte, error) {
-	action := page.CaptureScreenshot().WithFormat(page.CaptureScreenshotFormatPng)
+	action := page.CaptureScreenshot().WithFormat(page.CaptureScreenshotFormatPng).WithCaptureBeyondViewport(false)
 	if clip != nil {
 		action = action.WithClip(clip)
 	}
@@ -609,13 +671,6 @@ func expandSelectElements(ctx context.Context, selector string) error {
     var cs = window.getComputedStyle(s);
     var selected = s.selectedIndex;
 
-    // Build option list
-    var items = [];
-    for (var j = 0; j < s.options.length; j++) {
-      var opt = s.options[j];
-      items.push({text: opt.text, value: opt.value, selected: j === selected, disabled: opt.disabled});
-    }
-
     // Create overlay container
     var overlay = document.createElement('div');
     overlay.className = '__sesnap-select-overlay';
@@ -633,12 +688,12 @@ func expandSelectElements(ctx context.Context, selector string) error {
       'box-sizing:border-box;' +
       'max-height:400px;overflow-y:auto;';
 
-    for (var j = 0; j < items.length; j++) {
-      var item = items[j];
+    for (var j = 0; j < s.options.length; j++) {
+      var item = s.options[j];
       var div = document.createElement('div');
       div.textContent = item.text;
-      var bgColor = item.selected ? '#0b57d0' : '#fff';
-      var fgColor = item.selected ? '#fff' : '#202124';
+      var bgColor = j === selected ? '#0b57d0' : '#fff';
+      var fgColor = j === selected ? '#fff' : '#202124';
       if (item.disabled) { fgColor = '#9e9e9e'; }
       div.style.cssText = 'padding:4px 8px;' +
         'white-space:nowrap;' +
@@ -654,17 +709,20 @@ func expandSelectElements(ctx context.Context, selector string) error {
 
     document.body.appendChild(overlay);
   }
-})` + "('" + strings.ReplaceAll(jsSelector, "'", "\\'") + "')"
+})`
+	literal, _ := json.Marshal(jsSelector)
+	js += "(" + string(literal) + ")"
 
 	return chromedp.Evaluate(js, nil).Do(ctx)
 }
 
-// getElementRect returns the bounding client rect of the first element
+// getElementRect returns the document rect of the first element
 // matching the given CSS selector.
 func getElementRect(ctx context.Context, selector string) (x, y, w, h float64, err error) {
 	var rect []float64
+	literal, _ := json.Marshal(selector)
 	if err = chromedp.Evaluate(
-		`(function(){var r=document.querySelector(`+"`"+selector+"`"+`).getBoundingClientRect();return[r.x,r.y,r.width,r.height]})()`,
+		`(function(){var r=document.querySelector(`+string(literal)+`).getBoundingClientRect();return[r.x+window.scrollX,r.y+window.scrollY,r.width,r.height]})()`,
 		&rect,
 	).Do(ctx); err != nil {
 		return
@@ -833,8 +891,7 @@ func buildAddressBarHTML(pageURL, faviconURL string) string {
 // clampDim clamps a CSS dimension to Chrome's max texture size to avoid tiling artifacts.
 // The GPU limit is in physical pixels, so we divide by deviceScaleFactor.
 func clampDim(v int64, scaleFactor float64) int64 {
-	maxCSS := int64(math.Floor(float64(maxPhysicalDim) / scaleFactor))
-	return min(v, maxCSS)
+	return int64(min(float64(v), math.Floor(float64(maxPhysicalDim)/scaleFactor)))
 }
 
 // closeAllTargets closes all page targets via CDP so no tabs remain in the
@@ -855,19 +912,15 @@ func closeAllTargets(ctx context.Context) {
 	}
 }
 
-// removeStaleChromeLocks removes lock files left by previous crashed runs.
-func removeStaleChromeLocks(userDataDir string) {
-	for _, name := range []string{"SingletonLock", "SingletonCookie", "SingletonSocket"} {
-		p := filepath.Join(userDataDir, name)
-		if err := os.Remove(p); err == nil {
-			log.Printf("removed stale lock: %s", p)
-		}
-	}
-}
-
-// cleanupProfileCache deletes the cached profile directory unless -s is specified.
+// cleanupProfileCache releases reusable caches or deletes temporary copies.
 func cleanupProfileCache(cacheDir string) {
-	if cacheDir == "" || *arguments.reUseProfile {
+	if cacheDir == "" {
+		return
+	}
+	if *arguments.reUseProfile {
+		if err := os.Remove(cacheDir + ".lock"); err != nil {
+			log.Printf("release profile cache: %v", err)
+		}
 		return
 	}
 	log.Printf("delete cached profile: %s", cacheDir)
@@ -878,15 +931,15 @@ func cleanupProfileCache(cacheDir string) {
 
 // chromeProfileCacheRoot returns the root directory for cached Chrome profiles.
 // Can be overridden by the SESNAP_CACHE_DIR environment variable.
-func chromeProfileCacheRoot() string {
+func chromeProfileCacheRoot() (string, error) {
 	if dir := os.Getenv("SESNAP_CACHE_DIR"); dir != "" {
-		return dir
+		return dir, nil
 	}
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
-		log.Fatalf("failed to get user home directory: %v", err)
+		return "", err
 	}
-	return filepath.Join(homeDir, ".sesnap")
+	return filepath.Join(homeDir, ".sesnap"), nil
 }
 
 func logSettings(profileCacheDir string) {
@@ -940,7 +993,7 @@ func defineFlagValue[T comparable](short, long string, defaultValue T, descripti
 // Custom usage message
 func customUsage(description string) func() {
 	return func() {
-		optionsUsage, requiredOptionExample := getOptionsUsage(false)
+		optionsUsage, requiredOptionExample := getOptionsUsage()
 		fmt.Fprintf(flag.CommandLine.Output(), "Usage: %s %s[OPTIONS]\n\n", func() string { e, _ := os.Executable(); return filepath.Base(e) }(), requiredOptionExample)
 		fmt.Fprintf(flag.CommandLine.Output(), "Description:\n  %s\n\n", description)
 		fmt.Fprintf(flag.CommandLine.Output(), "Options:\n%s", optionsUsage)
@@ -948,26 +1001,20 @@ func customUsage(description string) func() {
 }
 
 // Get options usage message
-func getOptionsUsage(currentValue bool) (string, string) {
+func getOptionsUsage() (string, string) {
 	requiredOptionExample := ""
 	optionNameWidth := 0
 	usages := make([]string, 0)
-	getType := func(v string) string {
-		return strings.NewReplacer("*main.stringSlice", "<string>", "*flag.boolValue", "", "*flag.", "<", "Value", ">").Replace(v)
-	}
 	flag.VisitAll(func(f *flag.Flag) {
-		optionNameWidth = max(optionNameWidth, len(fmt.Sprintf("%s %s", f.Name, getType(fmt.Sprintf("%T", f.Value))))+4)
+		name, _ := flag.UnquoteUsage(f)
+		optionNameWidth = max(optionNameWidth, len(f.Name)+len(name)+5)
 	})
 	flag.VisitAll(func(f *flag.Flag) {
 		if f.Usage == UsageDummy {
 			return
 		}
-		value := getType(fmt.Sprintf("%T", f.Value))
-		if currentValue {
-			value = f.Value.String()
-		}
-		short := strings.Split(f.Usage, UsageDummy)[0]
-		mainUsage := strings.Split(f.Usage, UsageDummy)[1]
+		value, _ := flag.UnquoteUsage(f)
+		short, mainUsage, _ := strings.Cut(f.Usage, UsageDummy)
 		if strings.Contains(mainUsage, Req) {
 			requiredOptionExample += fmt.Sprintf("--%s %s ", f.Name, value)
 		}
@@ -983,95 +1030,44 @@ func getOptionsUsage(currentValue bool) (string, string) {
 // MCP Server
 // =======================================
 
-func runMCPServer() {
-	// --- 1. Profile cache setup ---
-	profileCacheDir := setupProfileCache()
-
-	// --- 2. Browser context ---
-	browserCtx, shutdownBrowser := newBrowserContext(profileCacheDir)
-	cleanup := func() {
-		shutdownBrowser()
-		cleanupProfileCache(profileCacheDir)
-	}
-	defer cleanup()
-
-	// Handle interrupt signals
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
-	go func() {
-		<-sigCh
-		cleanup()
-		os.Exit(0)
-	}()
-
-	// --- 3. Start browser ---
-	if err := chromedp.Run(browserCtx); err != nil {
-		log.Fatal(err)
-	}
-
-	sem := make(chan struct{}, *arguments.parallel)
-
-	// --- 4. Create MCP server ---
+func runMCPServer(ctx, browserCtx context.Context, sem chan struct{}) error {
 	s := server.NewMCPServer(
 		"sesnap",
 		version,
 		server.WithToolCapabilities(false),
 	)
 
-	// --- 5. Register tools ---
-
-	// screenshot: capture URLs and return images directly (base64)
-	s.AddTool(
-		mcp.NewTool("screenshot",
-			mcp.WithDescription("Take screenshots of web pages and return images directly. Supports parallel multi-URL capture."),
-			mcp.WithArray("urls",
-				mcp.Description("URLs to capture"),
-				mcp.WithStringItems(),
-				mcp.Required(),
-				mcp.MinItems(1),
-			),
-			mcp.WithNumber("width", mcp.Description("Viewport width in CSS pixels (default: 1280)")),
-			mcp.WithNumber("height", mcp.Description("Viewport height in CSS pixels (default: 860)")),
-			mcp.WithBoolean("full", mcp.Description("Enable full-page screenshot (default: false)")),
-			mcp.WithString("query", mcp.Description("CSS selector to screenshot a specific element")),
-			mcp.WithNumber("wait", mcp.Description("Wait seconds after navigation before capture (default: 3)")),
-			mcp.WithString("click", mcp.Description("Click the first element matching this CSS selector before capture")),
-			mcp.WithArray("clicks", mcp.Description("CSS selectors to click in order before capture; cannot be combined with click"), mcp.WithStringItems()),
-			mcp.WithString("hover", mcp.Description("Hover over the first element matching this CSS selector before capture")),
-			mcp.WithString("expand_select", mcp.Description("Expand <select> elements as HTML overlay. Use CSS selector or \"*\" for all")),
-			mcp.WithBoolean("address_bar", mcp.Description("Add browser-style address bar to screenshot (default: false)")),
-			mcp.WithString("format", mcp.Description("Image format: \"png\" or \"jpeg\" (default: \"png\")")),
-			mcp.WithNumber("quality", mcp.Description("JPEG quality 1-100 (default: 80, only used with format=jpeg)")),
-			mcp.WithNumber("scale", mcp.Description("Device scale factor (default: 1.0)")),
+	// Shared inputs keep both screenshot tools consistent.
+	options := []mcp.ToolOption{
+		mcp.WithArray("urls",
+			mcp.Description("URLs to capture"),
+			mcp.WithStringItems(),
+			mcp.Required(),
+			mcp.MinItems(1),
 		),
-		mcpScreenshotHandler(browserCtx, sem, false),
-	)
+		mcp.WithNumber("width", mcp.Description("Viewport width in CSS pixels (default: 1280)")),
+		mcp.WithNumber("height", mcp.Description("Viewport height in CSS pixels (default: 860)")),
+		mcp.WithBoolean("full", mcp.Description("Enable full-page screenshot (default: false)")),
+		mcp.WithString("query", mcp.Description("CSS selector to screenshot a specific element")),
+		mcp.WithNumber("wait", mcp.Description("Wait seconds after navigation before capture (default: 3)")),
+		mcp.WithString("click", mcp.Description("Click the first element matching this CSS selector before capture")),
+		mcp.WithArray("clicks", mcp.Description("CSS selectors to click in order before capture; cannot be combined with click"), mcp.WithStringItems()),
+		mcp.WithString("hover", mcp.Description("Hover over the first element matching this CSS selector before capture")),
+		mcp.WithString("expand_select", mcp.Description("Expand <select> elements as HTML overlay. Use CSS selector or \"*\" for all")),
+		mcp.WithBoolean("address_bar", mcp.Description("Add browser-style address bar to screenshot (default: false)")),
+		mcp.WithString("format", mcp.Description("Image format: \"png\" or \"jpeg\" (default: \"png\")")),
+		mcp.WithNumber("quality", mcp.Description("JPEG quality 1-100 (default: 80, only used with format=jpeg)")),
+		mcp.WithNumber("scale", mcp.Description("Device scale factor (default: 1.0)")),
+		mcp.WithNumber("timeout", mcp.Description("Timeout seconds per URL (default: 60)")),
+	}
+	s.AddTool(mcp.NewTool("screenshot", append(options, mcp.WithDescription("Take screenshots of web pages and return images directly."))...), mcpScreenshotHandler(browserCtx, sem, false))
 
 	// screenshot_to_file: capture URLs and save to files (no image tokens)
 	s.AddTool(
-		mcp.NewTool("screenshot_to_file",
+		mcp.NewTool("screenshot_to_file", append(options,
 			mcp.WithDescription("Take screenshots of web pages and save to files. Returns file paths instead of images."),
-			mcp.WithArray("urls",
-				mcp.Description("URLs to capture"),
-				mcp.WithStringItems(),
-				mcp.Required(),
-				mcp.MinItems(1),
-			),
 			mcp.WithString("output", mcp.Description("Output file path (auto-numbered for multiple URLs: <base>_001.png, _002.png, ...)"), mcp.Required()),
-			mcp.WithNumber("width", mcp.Description("Viewport width in CSS pixels (default: 1280)")),
-			mcp.WithNumber("height", mcp.Description("Viewport height in CSS pixels (default: 860)")),
-			mcp.WithBoolean("full", mcp.Description("Enable full-page screenshot (default: false)")),
-			mcp.WithString("query", mcp.Description("CSS selector to screenshot a specific element")),
-			mcp.WithNumber("wait", mcp.Description("Wait seconds after navigation before capture (default: 3)")),
-			mcp.WithString("click", mcp.Description("Click the first element matching this CSS selector before capture")),
-			mcp.WithArray("clicks", mcp.Description("CSS selectors to click in order before capture; cannot be combined with click"), mcp.WithStringItems()),
-			mcp.WithString("hover", mcp.Description("Hover over the first element matching this CSS selector before capture")),
-			mcp.WithString("expand_select", mcp.Description("Expand <select> elements as HTML overlay. Use CSS selector or \"*\" for all")),
-			mcp.WithBoolean("address_bar", mcp.Description("Add browser-style address bar to screenshot (default: false)")),
-			mcp.WithString("format", mcp.Description("Image format: \"png\" or \"jpeg\" (default: \"png\")")),
-			mcp.WithNumber("quality", mcp.Description("JPEG quality 1-100 (default: 80, only used with format=jpeg)")),
-			mcp.WithNumber("scale", mcp.Description("Device scale factor (default: 1.0)")),
-		),
+		)...),
 		mcpScreenshotHandler(browserCtx, sem, true),
 	)
 
@@ -1094,14 +1090,55 @@ func runMCPServer() {
 	)
 
 	// --- 6. Start stdio server ---
-	if err := server.NewStdioServer(s).Listen(context.Background(), os.Stdin, os.Stdout); err != nil {
-		log.Fatalf("MCP server error: %v", err)
-	}
+	return server.NewStdioServer(s).Listen(ctx, os.Stdin, os.Stdout)
 }
 
 // mcpCaptureParams builds captureParams from MCP tool request arguments.
 func mcpCaptureParams(request mcp.CallToolRequest) (captureParams, error) {
 	args := request.GetArguments()
+	values := map[string]float64{}
+	for _, spec := range []struct {
+		key                string
+		fallback, min, max float64
+	}{
+		{"width", float64(defaultWidth), 1, float64(maxPhysicalDim)},
+		{"height", float64(defaultHeight), 1, float64(maxPhysicalDim)},
+		{"wait", defaultWait, 0, float64(maxWaitSeconds)},
+		{"timeout", captureTimeout.Seconds(), 1, float64(maxWaitSeconds)},
+		{"quality", defaultQuality, 1, 100},
+		{"scale", 1, 0, float64(maxPhysicalDim)},
+	} {
+		value := spec.fallback
+		if raw, ok := args[spec.key]; ok {
+			switch v := raw.(type) {
+			case float64:
+				value = v
+			case int:
+				value = float64(v)
+			default:
+				return captureParams{}, fmt.Errorf("%s must be a number", spec.key)
+			}
+		}
+		if math.IsNaN(value) || math.IsInf(value, 0) || value < spec.min || value > spec.max ||
+			(spec.key != "scale" && math.Trunc(value) != value) {
+			return captureParams{}, fmt.Errorf("%s is out of range or not an integer", spec.key)
+		}
+		values[spec.key] = value
+	}
+	for _, key := range []string{"query", "click", "hover", "expand_select", "format", "output"} {
+		if raw, ok := args[key]; ok {
+			if _, ok := raw.(string); !ok {
+				return captureParams{}, fmt.Errorf("%s must be a string", key)
+			}
+		}
+	}
+	for _, key := range []string{"full", "address_bar"} {
+		if raw, ok := args[key]; ok {
+			if _, ok := raw.(bool); !ok {
+				return captureParams{}, fmt.Errorf("%s must be a boolean", key)
+			}
+		}
+	}
 	_, hasClick := args["click"]
 	_, hasClicks := args["clicks"]
 	if hasClick && hasClicks {
@@ -1120,21 +1157,25 @@ func mcpCaptureParams(request mcp.CallToolRequest) (captureParams, error) {
 		if err != nil {
 			return captureParams{}, err
 		}
-		selectors = []string{sel}
+		if sel != "" {
+			selectors = []string{sel}
+		}
 	}
 
-	return captureParams{
-		windowWidth:    int64(request.GetFloat("width", 1280)),
-		windowHeight:   int64(request.GetFloat("height", 860)),
-		waitSeconds:    int(request.GetFloat("wait", 3)),
+	p := captureParams{
+		windowWidth:    int64(values["width"]),
+		windowHeight:   int64(values["height"]),
+		waitSeconds:    int(values["wait"]),
 		querySelector:  request.GetString("query", ""),
 		clickSelectors: selectors,
 		hoverSelector:  request.GetString("hover", ""),
 		expandSelect:   request.GetString("expand_select", ""),
 		fullScreenshot: request.GetBool("full", false),
 		showAddressBar: request.GetBool("address_bar", false),
-		scaleFactor:    request.GetFloat("scale", 1.0),
-	}, nil
+		scaleFactor:    values["scale"],
+		timeout:        time.Duration(values["timeout"]) * time.Second,
+	}
+	return p, p.validate()
 }
 
 // mcpScreenshotHandler returns a tool handler that captures screenshots.
@@ -1145,19 +1186,33 @@ func mcpScreenshotHandler(browserCtx context.Context, sem chan struct{}, toFile 
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
+		if len(reqURLs) == 0 {
+			return mcp.NewToolResultError("urls must not be empty"), nil
+		}
+		for _, url := range reqURLs {
+			if strings.TrimSpace(url) == "" {
+				return mcp.NewToolResultError("URLs must not be empty"), nil
+			}
+		}
 
 		p, err := mcpCaptureParams(request)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 		format := request.GetString("format", "png")
-		quality := int(request.GetFloat("quality", 80))
+		quality := int(request.GetFloat("quality", defaultQuality))
+		if format != "png" && format != "jpeg" {
+			return mcp.NewToolResultError("format must be png or jpeg"), nil
+		}
 
 		var outputBase string
 		if toFile {
 			outputBase, err = request.RequireString("output")
 			if err != nil {
 				return mcp.NewToolResultError(err.Error()), nil
+			}
+			if strings.TrimSpace(outputBase) == "" {
+				return mcp.NewToolResultError("output must not be empty"), nil
 			}
 		}
 
@@ -1170,20 +1225,7 @@ func mcpScreenshotHandler(browserCtx context.Context, sem chan struct{}, toFile 
 
 		for i, u := range reqURLs {
 			go func(i int, u string) {
-				sem <- struct{}{}
-				defer func() { <-sem }()
-
-				var tabCtx context.Context
-				var tabCancel context.CancelFunc
-				if len(reqURLs) == 1 {
-					tabCtx = browserCtx
-					tabCancel = func() {}
-				} else {
-					tabCtx, tabCancel = chromedp.NewContext(browserCtx)
-				}
-				defer tabCancel()
-
-				buf, captureErr := takeScreenshot(tabCtx, u, p)
+				buf, captureErr := captureTab(ctx, browserCtx, sem, u, p)
 				results <- captureResult{i, buf, captureErr}
 			}(i, u)
 		}
@@ -1197,8 +1239,10 @@ func mcpScreenshotHandler(browserCtx context.Context, sem chan struct{}, toFile 
 
 		// Build response
 		var content []mcp.Content
+		failed := false
 		for i, r := range ordered {
 			if r.err != nil {
+				failed = true
 				content = append(content, mcp.TextContent{
 					Type: "text",
 					Text: fmt.Sprintf("[%d] %s: error: %v", i+1, reqURLs[i], r.err),
@@ -1212,6 +1256,7 @@ func mcpScreenshotHandler(browserCtx context.Context, sem chan struct{}, toFile 
 				mimeType = "image/jpeg"
 				imgBuf, err = convertToJPEG(r.buf, quality)
 				if err != nil {
+					failed = true
 					content = append(content, mcp.TextContent{
 						Type: "text",
 						Text: fmt.Sprintf("[%d] %s: JPEG conversion error: %v", i+1, reqURLs[i], err),
@@ -1222,16 +1267,8 @@ func mcpScreenshotHandler(browserCtx context.Context, sem chan struct{}, toFile 
 
 			if toFile {
 				outPath := mcpOutputPath(outputBase, i, len(reqURLs), format)
-				if dir := filepath.Dir(outPath); dir != "." {
-					if err := os.MkdirAll(dir, 0755); err != nil {
-						content = append(content, mcp.TextContent{
-							Type: "text",
-							Text: fmt.Sprintf("[%d] %s: mkdir error: %v", i+1, reqURLs[i], err),
-						})
-						continue
-					}
-				}
-				if err := os.WriteFile(outPath, imgBuf, 0644); err != nil {
+				if err := saveImage(outPath, imgBuf); err != nil {
+					failed = true
 					content = append(content, mcp.TextContent{
 						Type: "text",
 						Text: fmt.Sprintf("[%d] %s: write error: %v", i+1, reqURLs[i], err),
@@ -1256,7 +1293,7 @@ func mcpScreenshotHandler(browserCtx context.Context, sem chan struct{}, toFile 
 			}
 		}
 
-		return &mcp.CallToolResult{Content: content}, nil
+		return &mcp.CallToolResult{Content: content, IsError: failed}, nil
 	}
 }
 
