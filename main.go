@@ -63,6 +63,7 @@ const (
 	cleanupTimeout          = 10 * time.Second
 	navigationTimeout       = 10 * time.Second
 	captureTimeout          = 60 * time.Second
+	clickDelay              = 500 * time.Millisecond
 	maxWaitSeconds          = int64(math.MaxInt64 / int64(time.Second))
 )
 
@@ -89,6 +90,7 @@ var (
 		parallel       *int
 		mcpMode        *bool
 		timeoutSeconds *int
+		waitSelector   *string
 	}{
 		defineFlagValue("o", "output" /*       */, "" /*               */, Req+"Output path of screenshot (with multiple URLs, auto-numbered: <base>_001.png, _002.png, ...)", flag.String, flag.StringVar),
 		defineFlagValue("q", "query" /*        */, "" /*               */, "Query selector. Screenshot the first matching element. ( e.g. -q=\".className#id\" )", flag.String, flag.StringVar),
@@ -106,6 +108,7 @@ var (
 		defineFlagValue("t", "parallel" /*     */, runtime.NumCPU() /* */, "Max number of parallel tabs for screenshot capture", flag.Int, flag.IntVar),
 		defineFlagValue("m", "mcp" /*          */, false /*            */, "Run as MCP (Model Context Protocol) server over stdio", flag.Bool, flag.BoolVar),
 		defineFlagValue("T", "timeout", int(captureTimeout/time.Second), "Timeout seconds per URL, including navigation and interactions", flag.Int, flag.IntVar),
+		defineFlagValue("a", "wait-for", "", "Wait for the first element matching this CSS selector to become visible after clicks, before capture", flag.String, flag.StringVar),
 	}
 )
 
@@ -116,6 +119,7 @@ type captureParams struct {
 	waitSeconds    int
 	querySelector  string
 	clickSelectors []string
+	waitSelector   string
 	hoverSelector  string
 	expandSelect   string
 	fullScreenshot bool
@@ -138,6 +142,7 @@ func captureParamsFromArgs() captureParams {
 		waitSeconds:    *arguments.waitSeconds,
 		querySelector:  *arguments.querySelector,
 		clickSelectors: selectors,
+		waitSelector:   *arguments.waitSelector,
 		hoverSelector:  *arguments.hoverSelector,
 		expandSelect:   *arguments.expandSelect,
 		fullScreenshot: *arguments.fullScreenshot,
@@ -159,6 +164,9 @@ func (p captureParams) validate() error {
 	}
 	if p.waitSeconds < 0 || int64(p.waitSeconds) > maxWaitSeconds {
 		return fmt.Errorf("wait is out of range")
+	}
+	if p.waitSelector != "" && strings.TrimSpace(p.waitSelector) == "" {
+		return fmt.Errorf("wait-for selector must not be blank")
 	}
 	for i, sel := range p.clickSelectors {
 		if strings.TrimSpace(sel) == "" {
@@ -462,17 +470,21 @@ func takeScreenshot(ctx context.Context, url string, p captureParams) ([]byte, e
 	for i, sel := range p.clickSelectors {
 		tasks = append(tasks,
 			chromedp.ActionFunc(func(ctx context.Context) error {
-				err := chromedp.Tasks{
-					chromedp.WaitVisible(sel, chromedp.ByQuery),
-					chromedp.Click(sel, chromedp.ByQuery),
-					chromedp.Sleep(500 * time.Millisecond),
-				}.Do(ctx)
+				err := clickAndWait(ctx, sel)
 				if err != nil {
 					return fmt.Errorf("click %d (%q): %w", i+1, sel, err)
 				}
 				return nil
 			}),
 		)
+	}
+	if p.waitSelector != "" {
+		tasks = append(tasks, chromedp.ActionFunc(func(ctx context.Context) error {
+			if err := chromedp.WaitVisible(p.waitSelector, chromedp.ByQuery).Do(ctx); err != nil {
+				return fmt.Errorf("wait-for (%q): %w", p.waitSelector, err)
+			}
+			return nil
+		}))
 	}
 	// Hover action before capture (e.g. trigger tooltip or :hover style)
 	if p.hoverSelector != "" {
@@ -539,17 +551,66 @@ func takeScreenshot(ctx context.Context, url string, p captureParams) ([]byte, e
 		}))
 	}
 
+	var captureURL string
+	if p.showAddressBar {
+		tasks = append(tasks, chromedp.Evaluate(`location.href`, &captureURL))
+	}
 	if err := chromedp.Run(ctx, tasks); err != nil {
 		return nil, err
 	}
 	if p.showAddressBar {
-		combined, err := addAddressBar(ctx, url, buf, p.scaleFactor)
+		combined, err := addAddressBar(ctx, captureURL, buf, p.scaleFactor)
 		if err != nil {
 			return nil, err
 		}
 		buf = combined
 	}
 	return buf, nil
+}
+
+// Track the main frame before clicking so slow responses and redirects are not missed.
+func clickAndWait(ctx context.Context, selector string) error {
+	if err := chromedp.WaitVisible(selector, chromedp.ByQuery).Do(ctx); err != nil {
+		return err
+	}
+	tree, err := page.GetFrameTree().Do(ctx)
+	if err != nil {
+		return err
+	}
+	listenCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var mu sync.Mutex
+	var loading bool
+	chromedp.ListenTarget(listenCtx, func(event any) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch e := event.(type) {
+		case *page.EventFrameStartedLoading:
+			if e.FrameID == tree.Frame.ID {
+				loading = true
+			}
+		case *page.EventFrameStoppedLoading:
+			if e.FrameID == tree.Frame.ID {
+				loading = false
+			}
+		}
+	})
+	if err := (chromedp.Tasks{chromedp.Click(selector, chromedp.ByQuery), chromedp.Sleep(clickDelay)}).Do(ctx); err != nil {
+		return err
+	}
+	waitCtx, waitCancel := context.WithTimeout(ctx, navigationTimeout)
+	defer waitCancel()
+	for {
+		mu.Lock()
+		pending := loading
+		mu.Unlock()
+		if !pending {
+			return nil
+		}
+		if err := chromedp.Sleep(100 * time.Millisecond).Do(waitCtx); err != nil {
+			return fmt.Errorf("wait for navigation: %w", err)
+		}
+	}
 }
 
 // navigate waits for this loader to commit and parse, not for all resources to load.
@@ -1052,6 +1113,7 @@ func runMCPServer(ctx, browserCtx context.Context, sem chan struct{}) error {
 		mcp.WithNumber("wait", mcp.Description("Wait seconds after navigation before capture (default: 3)")),
 		mcp.WithString("click", mcp.Description("Click the first element matching this CSS selector before capture")),
 		mcp.WithArray("clicks", mcp.Description("CSS selectors to click in order before capture; cannot be combined with click"), mcp.WithStringItems()),
+		mcp.WithString("wait_for", mcp.Description("Wait for the first element matching this CSS selector to become visible after clicks, before capture")),
 		mcp.WithString("hover", mcp.Description("Hover over the first element matching this CSS selector before capture")),
 		mcp.WithString("expand_select", mcp.Description("Expand <select> elements as HTML overlay. Use CSS selector or \"*\" for all")),
 		mcp.WithBoolean("address_bar", mcp.Description("Add browser-style address bar to screenshot (default: false)")),
@@ -1125,7 +1187,7 @@ func mcpCaptureParams(request mcp.CallToolRequest) (captureParams, error) {
 		}
 		values[spec.key] = value
 	}
-	for _, key := range []string{"query", "click", "hover", "expand_select", "format", "output"} {
+	for _, key := range []string{"query", "click", "wait_for", "hover", "expand_select", "format", "output"} {
 		if raw, ok := args[key]; ok {
 			if _, ok := raw.(string); !ok {
 				return captureParams{}, fmt.Errorf("%s must be a string", key)
@@ -1168,6 +1230,7 @@ func mcpCaptureParams(request mcp.CallToolRequest) (captureParams, error) {
 		waitSeconds:    int(values["wait"]),
 		querySelector:  request.GetString("query", ""),
 		clickSelectors: selectors,
+		waitSelector:   request.GetString("wait_for", ""),
 		hoverSelector:  request.GetString("hover", ""),
 		expandSelect:   request.GetString("expand_select", ""),
 		fullScreenshot: request.GetBool("full", false),

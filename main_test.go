@@ -90,6 +90,25 @@ func TestMCPClicks(t *testing.T) {
 	}
 }
 
+func TestWaitForInputs(t *testing.T) {
+	oldFlags, oldSelector := flag.CommandLine, arguments.waitSelector
+	t.Cleanup(func() { flag.CommandLine, arguments.waitSelector = oldFlags, oldSelector })
+	flag.CommandLine = flag.NewFlagSet("test", flag.ContinueOnError)
+	arguments.waitSelector = defineFlagValue("a", "wait-for", "", "", flag.String, flag.StringVar)
+	if err := flag.CommandLine.Parse([]string{"--wait-for=#ready"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := captureParamsFromArgs().waitSelector; got != "#ready" {
+		t.Fatalf("wait-for = %q", got)
+	}
+	var req mcp.CallToolRequest
+	req.Params.Arguments = map[string]any{"wait_for": "#ready"}
+	p, err := mcpCaptureParams(req)
+	if err != nil || p.waitSelector != "#ready" {
+		t.Fatalf("MCP wait_for = %q, %v", p.waitSelector, err)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // outputPath
 // ---------------------------------------------------------------------------
@@ -352,6 +371,77 @@ func TestE2E_SequentialClicks(t *testing.T) {
 	}
 }
 
+func TestE2E_ClickNavigation(t *testing.T) {
+	skipUnlessE2E(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		switch {
+		case r.URL.Path == "/redirect":
+			http.Redirect(w, r, "/destination", http.StatusFound)
+		case r.URL.Path == "/destination" || r.Method == http.MethodPost:
+			time.Sleep(1500 * time.Millisecond)
+			w.Write([]byte(`<body style="margin:0;background:rgb(20,180,70)"><h1 id="ready">Destination</h1></body>`))
+		case r.URL.Path == "/reload":
+			w.Write([]byte(`<body style="background:red"><form method="post"><button id="go">Reload</button></form></body>`))
+		case r.URL.Path == "/spa":
+			w.Write([]byte(`<body style="background:red"><button id="go" onclick="document.body.innerHTML='';document.body.style.background='white';setTimeout(() => {document.body.style.background='rgb(20,180,70)';document.body.innerHTML='<h1 id=ready>Destination</h1>';},1500)">Go</button></body>`))
+		case r.URL.Path == "/history":
+			w.Write([]byte(`<body style="background:red"><button id="go" onclick="history.pushState({}, '', '/updated?view=2#ready');document.body.style.background='rgb(20,180,70)'">Go</button></body>`))
+		default:
+			w.Write([]byte(`<body style="background:red"><a id="go" href="/redirect">Go</a></body>`))
+		}
+	}))
+	defer srv.Close()
+	browserCtx, shutdown := newBrowserContext("")
+	defer shutdown()
+	if err := chromedp.Run(browserCtx); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, path, waitFor, finalPath string
+		clicks                         []string
+	}{
+		{"redirect", "/", "", "/destination", []string{"#go"}},
+		{"reload", "/reload", "", "/reload", []string{"#go"}},
+		{"spa", "/spa", "#ready", "/spa", []string{"#go"}},
+		{"history", "/history", "", "/updated?view=2#ready", []string{"#go"}},
+		{"initial_redirect", "/redirect", "#ready", "/destination", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(browserCtx, 15*time.Second)
+			defer cancel()
+			p := captureParams{windowWidth: 640, windowHeight: 360, scaleFactor: 1,
+				clickSelectors: tc.clicks, waitSelector: tc.waitFor, showAddressBar: true}
+			buf, err := takeScreenshot(ctx, srv.URL+tc.path, p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			img, err := png.Decode(bytes.NewReader(buf))
+			if err != nil {
+				t.Fatal(err)
+			}
+			r, g, b, _ := img.At(320, 232).RGBA()
+			if img.Bounds().Dx() != 640 || img.Bounds().Dy() != 412 || r>>8 != 20 || g>>8 != 180 || b>>8 != 70 {
+				t.Fatalf("wrong destination screenshot: %v, RGB %d,%d,%d", img.Bounds(), r>>8, g>>8, b>>8)
+			}
+			var displayedURL string
+			if err := chromedp.Run(ctx, chromedp.Evaluate(`document.querySelector('.url').textContent`, &displayedURL)); err != nil {
+				t.Fatal(err)
+			}
+			if displayedURL != srv.URL+tc.finalPath {
+				t.Fatalf("address bar = %q, want %q", displayedURL, srv.URL+tc.finalPath)
+			}
+		})
+	}
+	ctx, cancel := context.WithTimeout(browserCtx, 2*time.Second)
+	defer cancel()
+	p := captureParams{windowWidth: 640, windowHeight: 360, scaleFactor: 1, waitSelector: "#missing"}
+	buf, err := takeScreenshot(ctx, srv.URL+"/history", p)
+	if err == nil || !strings.Contains(err.Error(), `wait-for ("#missing")`) || len(buf) != 0 {
+		t.Fatalf("missing wait-for must fail without a screenshot: %v, bytes=%d", err, len(buf))
+	}
+}
+
 func TestE2E_ScreenshotModes(t *testing.T) {
 	skipUnlessE2E(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -409,6 +499,7 @@ func TestMCPInvalidInputs(t *testing.T) {
 		{"wait": -1}, {"wait": 1e100}, {"timeout": 0},
 		{"quality": 101}, {"format": "webp"}, {"output": " "},
 		{"width": "320"}, {"full": "true"},
+		{"wait_for": 1}, {"wait_for": " "},
 	} {
 		if _, ok := args["urls"]; !ok {
 			args["urls"] = []string{"http://example.com"}

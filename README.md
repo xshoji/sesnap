@@ -60,9 +60,10 @@ sesnap -u <URL> -o /tmp/screenshot.png [options]
 | `-H` | `--height` | `860` | Viewport height |
 | `-e` | `--hover` | `""` | Hover over the first element matching the CSS selector before capture |
 | `-k` | `--click` | — | Click the first element matching the CSS selector before capture; repeat to click in order |
+| `-a` | `--wait-for` | `""` | Wait for the first element matching this CSS selector to become visible after clicks, before hover and capture |
 | `-s` | `--expand-select` | `""` | Expand `<select>` elements as HTML dropdown overlay before capture. Use CSS selector or `"*"` for all |
 | `-f` | `--full` | `false` | Enable full-page screenshot |
-| `-b` | `--address-bar` | `false` | Add browser-style address bar (favicon + URL) to the top of screenshot |
+| `-b` | `--address-bar` | `false` | Add browser-style address bar (favicon + actual browser URL at capture time) to the top of screenshot |
 | `-d` | `--debug` | `false` | Enable debug mode |
 | `-n` | `--no-headless` | `false` | Disable headless mode (show browser window) |
 | `-r` | `--reuse` | `false` | Reuse cached profile (do not delete after execution) |
@@ -114,11 +115,16 @@ sesnap -u="https://example.com/" -s="*" -o=/tmp/all_selects.png
 
 # Click to open menu, then hover a sub-item
 sesnap -u="https://example.com/" -k=".menu-button" -e=".submenu-item" -o=/tmp/submenu.png
+
+# Click, wait for the destination content, and show the final URL
+sesnap -u="https://example.com/" -k=".next" --wait-for="#ready" -b -o=/tmp/destination.png
 ```
 
-Repeated `-k` / `--click` flags run in the order supplied, before hover and select expansion. Each click waits for the target to become visible, then waits 500ms after clicking. This delay does not guarantee that network requests or animations have finished. A failed click stops capture for that URL; the error includes the click number and selector. Commas remain part of the CSS selector, not separators between operations. Empty flags (`--click=""`) retain the legacy no-click behavior; whitespace-only selectors are rejected.
+Repeated `-k` / `--click` flags run in the order supplied, before hover and select expansion. Each click waits for the target to become visible, then waits at least 500ms. If the main frame is still loading, capture waits for loading to stop (up to another 10 seconds), including same-URL reloads and redirects. Actions stay in the original tab; links that open a new tab do not switch the capture target. A failed click stops capture for that URL; the error includes the click number and selector. Commas remain part of the CSS selector, not separators between operations. Empty flags (`--click=""`) retain the legacy no-click behavior; whitespace-only selectors are rejected.
 
-Each URL has a 60-second capture deadline (`-T` / `--timeout` to change it), starting when a capture slot is acquired. Navigation commit and document parsing have a separate 10-second limit; capture does not wait for every resource to load. Failed URLs do not prevent other URLs from completing. Any failure returns a nonzero CLI exit status after cleanup.
+For SPA updates or asynchronous rendering, use `-a` / `--wait-for` with a selector that becomes visible when the desired content is ready. This wait runs after all clicks, before hover and select expansion, and does not change the capture area. It also works without clicks. A missing element fails at the per-URL capture deadline. An already-visible element satisfies the wait immediately; choose a selector specific to the destination state. The 500ms delay alone cannot detect navigation that starts later or guarantee completion of asynchronous requests or animations. `-w` / `--wait` applies only after the initial navigation, not after clicks.
+
+Each URL has a 60-second capture deadline (`-T` / `--timeout` to change it), starting when a capture slot is acquired. Initial navigation commit and document parsing have a separate 10-second limit and do not wait for every resource to load. Failed URLs do not prevent other URLs from completing. Any failure returns a nonzero CLI exit status after cleanup.
 
 ### MCP Server Mode
 
@@ -147,6 +153,14 @@ Both screenshot tools accept `clicks` for sequential clicks:
 ```
 
 The existing `click` string remains supported for a single click (`click: ""` still means no click). Supplying both `click` and `clicks` is an error. An empty `clicks` array performs no clicks; empty elements are rejected.
+
+Use `wait_for` to wait for destination content without cropping the screenshot:
+
+```json
+{"urls": ["https://example.com/"], "clicks": [".next"], "wait_for": "#ready", "address_bar": true}
+```
+
+`address_bar` displays the actual browser URL at capture time, including redirects and SPA URL changes.
 
 Each URL uses a separate tab, including simultaneous single-URL requests. The `timeout` parameter sets the capture deadline in seconds (default: 60), and request cancellation stops active captures and queued work. A failed URL or file write sets `isError: true`, including partial failures; successful images or paths remain in the response.
 
