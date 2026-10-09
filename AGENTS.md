@@ -1,8 +1,8 @@
-# AGENTS.md — sitesnap
+# AGENTS.md — sesnap
 
 ## Project Overview
 
-sitesnap is a CLI tool that takes web page screenshots using headless Chrome via [chromedp](https://github.com/chromedp/chromedp). The entire tool is a single `main.go` with no external dependencies beyond chromedp. Only Chrome is required — no Node.js, no Puppeteer, no Playwright.
+sesnap is a CLI and MCP screenshot tool using headless Chrome via [chromedp](https://github.com/chromedp/chromedp). All logic is in `main.go`; the other direct dependency is mcp-go. Only Chrome is required at runtime — no Node.js, no Puppeteer, no Playwright.
 
 ### Key Selling Points
 
@@ -14,15 +14,19 @@ sitesnap is a CLI tool that takes web page screenshots using headless Chrome via
 
 All logic lives in `main.go`. No packages, no subdirectories.
 
-### Main Flow (`main()`)
+### Main Flow (`main()` → `run()`)
 
 1. Parse flags (each flag supports both short `-x` and long `--name` forms)
 2. Copy Chrome profile to cache dir (if `-p`/`--profile` specified)
 3. Launch a single Chrome process (`NewExecAllocator` → `NewContext`)
 4. Spawn goroutines per URL, each creating a new tab (`NewContext(browserCtx)`)
-5. Each tab: set viewport → navigate → wait → capture
+5. Each tab: set viewport → navigation commit and parsing → wait → clicks → hover → select expansion → capture
 6. Write PNG files
 7. Shutdown Chrome, cleanup profile cache
+
+CLI and MCP share lifecycle, per-URL tabs, cancellation, and file saving. Capture deadlines default to 60 seconds (`-T`/`--timeout`, MCP `timeout`); navigation has a 10-second limit. CLI collects all results before returning an error. MCP marks partial and total failures with `IsError`.
+
+Reusable profile caches use a hash of the resolved absolute source path. Copies are published atomically; the same cache cannot be used concurrently. Never delete Chrome's `Singleton*` locks. Forced termination can leave a sesnap `.lock` directory requiring manual removal after confirming it is unused.
 
 ### Screenshot Modes (the `switch` in `takeScreenshot`)
 
@@ -44,7 +48,7 @@ Chrome's `captureBeyondViewport` compositor path is unreliable when multiple tab
 
 ### Problem 2: GPU texture tiling artifacts
 
-When a page's full height exceeds Chrome's GPU texture limit (~16384 CSS pixels), the compositor produces **tiled/repeated artifacts** — the same content is rendered in a grid pattern across the entire image.
+When a page's full height exceeds Chrome's GPU texture limit (~16384 physical pixels), the compositor produces **tiled/repeated artifacts** — the same content is rendered in a grid pattern across the entire image.
 
 ### Our Solution: Viewport-resize approach
 
@@ -52,7 +56,7 @@ Instead of `captureBeyondViewport`, we:
 
 1. Navigate to the page with the user-specified viewport
 2. Query the full page dimensions via JavaScript (`scrollWidth`, `scrollHeight`)
-3. Call `emulation.SetDeviceMetricsOverride` to resize the viewport to match the full content (clamped to `maxViewportDim = 16384`)
+3. Call `emulation.SetDeviceMetricsOverride` to resize the viewport to match the full content (clamped to `floor(maxPhysicalDim / deviceScaleFactor)`)
 4. Take a normal `page.CaptureScreenshot()` (no `captureBeyondViewport`)
 
 This is safe for parallel execution because `SetDeviceMetricsOverride` is scoped to each tab's CDP session.
@@ -61,7 +65,7 @@ The same approach is applied to `-q`/`--query` (element screenshots): we expand 
 
 ### Pre-capture Actions
 
-- `-k`/`--click` and `-e`/`--hover` perform DOM interactions before capture.
+- Repeated `-k`/`--click` selectors run in order, each waiting for visibility and then 500ms after clicking. MCP accepts `clicks` arrays or the legacy `click` string, never both. `-e`/`--hover` runs after all clicks.
 - `-s`/`--expand-select` injects JavaScript that replaces `<select>` elements with visible HTML dropdown overlays so their options appear in the screenshot. Accepts a CSS selector (e.g. `select#country`) or `"*"` for all `<select>` elements. Implemented in `expandSelectElements()`.
 
 ## Constants
@@ -75,22 +79,22 @@ The same approach is applied to `-q`/`--query` (element screenshots): we expand 
 go test -v
 
 # E2E tests (Chrome required)
-SITESNAP_E2E=1 go test -v
+SESNAP_E2E=1 go test -v
 ```
 
-- Unit tests cover: `outputPath`, `stringSlice`, `chromeProfileCacheRoot`, `removeStaleChromeLocks`, `setupProfileCache`, `cleanupProfileCache`
-- E2E tests (`TestE2E_*`) require `SITESNAP_E2E=1` and a running Chrome installation
+- Unit tests cover input validation, click ordering, output naming, profile cache isolation, locking, cleanup, and copy failure.
+- E2E tests (`TestE2E_*`) use local HTTP fixtures and require `SESNAP_E2E=1` and Chrome. Both CI workflows enable them.
 
 ## Build
 
 ```bash
-go build -ldflags="-s -w" -trimpath -o sitesnap main.go
+go build -ldflags="-s -w" -trimpath -o sesnap main.go
 ```
 
 ## Conventions
 
 - Single-file project: all code in `main.go`, tests in `main_test.go`
 - Package-level `var arguments` struct holds all flag pointers
-- `stringSlice` type enables repeated flags (`-u`/`--url`, `-c`/`--chrome-flag`)
-- Profile cache lives under `~/.sitesnap/` (overridable via `SITESNAP_CACHE_DIR`)
+- `stringSlice` type enables repeated flags (`-u`/`--url`, `-c`/`--chrome-flag`, `-k`/`--click`)
+- Reusable profile cache lives under `~/.sesnap/` (overridable via `SESNAP_CACHE_DIR`); other profile copies are temporary
 - Output numbering for multiple URLs: `<base>_001.png`, `_002.png`, ...

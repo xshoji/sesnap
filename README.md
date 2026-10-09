@@ -67,6 +67,7 @@ sesnap -u <URL> -o /tmp/screenshot.png [options]
 | `-n` | `--no-headless` | `false` | Disable headless mode (show browser window) |
 | `-r` | `--reuse` | `false` | Reuse cached profile (do not delete after execution) |
 | `-t` | `--parallel` | `NumCPU` | Max number of parallel tabs for screenshot capture |
+| `-T` | `--timeout` | `60` | Timeout seconds per URL, including navigation and interactions |
 | `-m` | `--mcp` | `false` | Run as MCP (Model Context Protocol) server over stdio |
 | `-c` | `--chrome-flag` | `""` | Extra Chrome flag as `key=value` (can be specified multiple times) |
 
@@ -115,7 +116,9 @@ sesnap -u="https://example.com/" -s="*" -o=/tmp/all_selects.png
 sesnap -u="https://example.com/" -k=".menu-button" -e=".submenu-item" -o=/tmp/submenu.png
 ```
 
-Repeated `-k` / `--click` flags run in the order supplied, before hover and select expansion. Each click waits for the target to become visible, then waits 500ms after clicking. This delay does not guarantee that network requests or animations have finished. A failed click stops capture for that URL; the error includes the click number and selector. Commas remain part of the CSS selector, not separators between operations.
+Repeated `-k` / `--click` flags run in the order supplied, before hover and select expansion. Each click waits for the target to become visible, then waits 500ms after clicking. This delay does not guarantee that network requests or animations have finished. A failed click stops capture for that URL; the error includes the click number and selector. Commas remain part of the CSS selector, not separators between operations. Empty flags (`--click=""`) retain the legacy no-click behavior; whitespace-only selectors are rejected.
+
+Each URL has a 60-second capture deadline (`-T` / `--timeout` to change it), starting when a capture slot is acquired. Navigation commit and document parsing have a separate 10-second limit; capture does not wait for every resource to load. Failed URLs do not prevent other URLs from completing. Any failure returns a nonzero CLI exit status after cleanup.
 
 ### MCP Server Mode
 
@@ -143,7 +146,11 @@ Both screenshot tools accept `clicks` for sequential clicks:
 {"urls": ["https://example.com/"], "clicks": [".menu-button", ".menu-item"]}
 ```
 
-The existing `click` string remains supported for a single click. Supplying both `click` and `clicks` is an error. An empty `clicks` array performs no clicks.
+The existing `click` string remains supported for a single click (`click: ""` still means no click). Supplying both `click` and `clicks` is an error. An empty `clicks` array performs no clicks; empty elements are rejected.
+
+Each URL uses a separate tab, including simultaneous single-URL requests. The `timeout` parameter sets the capture deadline in seconds (default: 60), and request cancellation stops active captures and queued work. A failed URL or file write sets `isError: true`, including partial failures; successful images or paths remain in the response.
+
+`urls` must be nonempty, and `output` must be nonempty for `screenshot_to_file`. Width and height must be positive integers fitting within 16384 CSS and physical pixels. `scale` must be finite and positive, `wait` a nonnegative integer, `timeout` a positive integer, `quality` an integer from 1 to 100, and `format` either `png` or `jpeg`.
 
 **AI client configuration example** (e.g. `claude_desktop_config.json`):
 
@@ -168,10 +175,15 @@ The existing `click` string remains supported for a single click. Supplying both
 - **Without `-r`**: the profile is copied to a system temporary directory (e.g., `/tmp/sesnap-userdata-*`) and automatically deleted after each run. Your home directory is never touched.
 - **With `-r`**: the profile is copied to a persistent cache directory (`~/.sesnap/`, overridable via `SESNAP_CACHE_DIR`) and kept for reuse across runs.
 
+Reusable caches are keyed by the resolved absolute source path, not just the profile name. Copies are published only after completion. Concurrent use of the same cache is rejected; use without `-r` for independent parallel processes. Chrome's `Singleton*` locks are never deleted by sesnap.
+
+After a forced termination, a cache's `.lock` directory may remain. The error reports its path. Remove only that directory after confirming no sesnap process is using the cache. Older basename-keyed caches are not reused or deleted automatically.
+
 
 ### Limitations
 
 - **Full-page screenshot size limit** — Full-page (`-f`) and element (`-q`) screenshots are limited by Chrome's GPU texture size of 16384 physical pixels per axis. With the default scale factor (2.0), this means pages taller or wider than **8192 CSS pixels** will be clipped. At scale factor 1.0, the limit is 16384 CSS pixels.
+- **Element position limit** — Element capture resets scrolling and clips to the expanded viewport. Elements outside its maximum bounds produce an error rather than an image of another region.
 
 ### Tips
 
