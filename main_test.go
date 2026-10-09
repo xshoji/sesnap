@@ -587,7 +587,8 @@ func TestE2E_CLIFailureCleanup(t *testing.T) {
 	if _, err := os.Stat(strings.TrimSuffix(output, ".png") + "_001.png"); !os.IsNotExist(err) {
 		t.Fatal("navigation error must not produce a screenshot")
 	}
-	entries, err := os.ReadDir(tempRoot)
+	// Chrome may leave temporary directories unrelated to our profile copies.
+	entries, err := filepath.Glob(filepath.Join(tempRoot, "sesnap-userdata-*"))
 	if err != nil || len(entries) != 0 {
 		t.Fatalf("temporary profiles remain after failure: %v, %v", entries, err)
 	}
