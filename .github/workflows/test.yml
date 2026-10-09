@@ -17,5 +17,9 @@ jobs:
         uses: actions/setup-go@v6
         with:
           go-version: '1.26'
+      - name: Set up Chrome
+        uses: browser-actions/setup-chrome@v2
       - name: Run tests
+        env:
+          SESNAP_E2E: '1'
         run: go test -v ./...
