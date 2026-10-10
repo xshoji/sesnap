@@ -1055,6 +1055,7 @@ func defineFlagValue[T comparable](short, long string, defaultValue T, descripti
 func customUsage(description string) func() {
 	return func() {
 		optionsUsage, requiredOptionExample := getOptionsUsage()
+		fmt.Fprintf(flag.CommandLine.Output(), "sesnap %s\n\n", version)
 		fmt.Fprintf(flag.CommandLine.Output(), "Usage: %s %s[OPTIONS]\n\n", func() string { e, _ := os.Executable(); return filepath.Base(e) }(), requiredOptionExample)
 		fmt.Fprintf(flag.CommandLine.Output(), "Description:\n  %s\n\n", description)
 		fmt.Fprintf(flag.CommandLine.Output(), "Options:\n%s", optionsUsage)
