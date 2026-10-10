@@ -72,19 +72,6 @@ sesnap -u <URL> -o /tmp/screenshot.png [options]
 | `-m` | `--mcp` | `false` | Run as MCP (Model Context Protocol) server over stdio |
 | `-C` | `--chrome-flag` | `""` | Extra Chrome flag as `key=value` (can be specified multiple times) |
 
-### Breaking change: short flags
-
-Long flags are unchanged. Update existing commands and MCP client launch arguments:
-
-| Long flag | Previous short flag | New short flag |
-|-----------|---------------------|----------------|
-| `--click` | `-k` | `-c` |
-| `--chrome-flag` | `-c` | `-C` |
-| `--parallel` | `-t` | `-j` |
-| `--timeout` | `-T` | `-t` |
-
-Old `-c` and `-t` now have different meanings; `-k` and `-T` are no longer accepted. Use long flags in scripts to avoid short-flag changes.
-
 ### Examples
 
 ```bash
