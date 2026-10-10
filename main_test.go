@@ -357,6 +357,27 @@ func skipUnlessE2E(t *testing.T) {
 	}
 }
 
+func startTestBrowser(t *testing.T) (context.Context, func()) {
+	t.Helper()
+	const maxRetries = 2
+	const startupTimeout = "websocket url timeout reached"
+
+	for retry := 0; ; retry++ {
+		ctx, shutdown := newBrowserContext("")
+		err := chromedp.Run(ctx)
+		if err == nil {
+			return ctx, shutdown
+		}
+
+		// Dispose of the failed process before starting a fresh browser.
+		shutdown()
+		if err.Error() != startupTimeout || retry == maxRetries {
+			t.Fatal(err)
+		}
+		t.Logf("Chrome startup timed out; retry %d/%d", retry+1, maxRetries)
+	}
+}
+
 func TestE2E_SequentialClicks(t *testing.T) {
 	skipUnlessE2E(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -367,11 +388,8 @@ func TestE2E_SequentialClicks(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	browserCtx, shutdown := newBrowserContext("")
+	browserCtx, shutdown := startTestBrowser(t)
 	defer shutdown()
-	if err := chromedp.Run(browserCtx); err != nil {
-		t.Fatal(err)
-	}
 	ctx, cancel := context.WithTimeout(browserCtx, 20*time.Second)
 	defer cancel()
 	p := captureParams{windowWidth: 800, windowHeight: 600, scaleFactor: 1, clickSelectors: []string{"#open", ".item", ".item"}}
@@ -415,11 +433,8 @@ func TestE2E_ClickNavigation(t *testing.T) {
 		}
 	}))
 	defer srv.Close()
-	browserCtx, shutdown := newBrowserContext("")
+	browserCtx, shutdown := startTestBrowser(t)
 	defer shutdown()
-	if err := chromedp.Run(browserCtx); err != nil {
-		t.Fatal(err)
-	}
 	for _, tc := range []struct {
 		name, path, waitFor, finalPath string
 		clicks                         []string
@@ -473,11 +488,8 @@ func TestE2E_ScreenshotModes(t *testing.T) {
 <button onclick="window.scrollTo(0,900)">Scroll</button><div id="target"></div><div id="tall"></div>`))
 	}))
 	defer srv.Close()
-	browserCtx, shutdown := newBrowserContext("")
+	browserCtx, shutdown := startTestBrowser(t)
 	defer shutdown()
-	if err := chromedp.Run(browserCtx); err != nil {
-		t.Fatal(err)
-	}
 	for _, tc := range []struct {
 		name, query   string
 		full          bool
@@ -572,11 +584,8 @@ func TestE2E_MCPIsolationAndCancel(t *testing.T) {
 		w.Write([]byte(`<style>body{margin:0;background:` + color + `}</style>`))
 	}))
 	defer srv.Close()
-	browserCtx, shutdown := newBrowserContext("")
+	browserCtx, shutdown := startTestBrowser(t)
 	defer shutdown()
-	if err := chromedp.Run(browserCtx); err != nil {
-		t.Fatal(err)
-	}
 	sem := make(chan struct{}, 2)
 	handler := mcpScreenshotHandler(browserCtx, sem, false)
 	var wg sync.WaitGroup
@@ -646,7 +655,7 @@ func TestE2E_SelectorEscaping(t *testing.T) {
 		w.Write([]byte(`<select id="foo:bar" data-key="a` + "`" + `${x}'" onmouseenter="document.body.dataset.hovered='yes'"><option>One</option><option selected>Two</option></select>`))
 	}))
 	defer srv.Close()
-	browserCtx, shutdown := newBrowserContext("")
+	browserCtx, shutdown := startTestBrowser(t)
 	defer shutdown()
 	ctx, cancel := context.WithTimeout(browserCtx, 20*time.Second)
 	defer cancel()
