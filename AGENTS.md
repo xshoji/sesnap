@@ -6,7 +6,7 @@ sesnap is a CLI and MCP screenshot tool using headless Chrome via [chromedp](htt
 
 ### Key Selling Points
 
-- **Parallel multi-URL capture** — Multiple URLs are captured simultaneously in separate browser tabs within a single Chrome process, controlled by `-t`/`--parallel` (defaults to `NumCPU`).
+- **Parallel multi-URL capture** — Multiple URLs are captured simultaneously in separate browser tabs within a single Chrome process, controlled by `-j`/`--parallel` (defaults to `NumCPU`).
 - **Lock-free Chrome profile usage** — The `-p`/`--profile` flag copies the user's Chrome profile to an isolated cache directory, allowing screenshots of logged-in sessions even while the main browser is running.
 - **Single binary, zero runtime deps** — Just Go + Chrome. No npm, no pip, no webdriver.
 
@@ -24,7 +24,7 @@ All logic lives in `main.go`. No packages, no subdirectories.
 6. Write PNG files
 7. Shutdown Chrome, cleanup profile cache
 
-CLI and MCP share lifecycle, per-URL tabs, cancellation, and file saving. Capture deadlines default to 60 seconds (`-T`/`--timeout`, MCP `timeout`); navigation has a 10-second limit. CLI collects all results before returning an error. MCP marks partial and total failures with `IsError`.
+CLI and MCP share lifecycle, per-URL tabs, cancellation, and file saving. Capture deadlines default to 60 seconds (`-t`/`--timeout`, MCP `timeout`); navigation has a 10-second limit. CLI collects all results before returning an error. MCP marks partial and total failures with `IsError`.
 
 Reusable profile caches use a hash of the resolved absolute source path. Copies are published atomically; the same cache cannot be used concurrently. Never delete Chrome's `Singleton*` locks. Forced termination can leave a sesnap `.lock` directory requiring manual removal after confirming it is unused.
 
@@ -65,7 +65,7 @@ The same approach is applied to `-q`/`--query` (element screenshots): we expand 
 
 ### Pre-capture Actions
 
-- Repeated `-k`/`--click` selectors run in order, each waiting for visibility and then 500ms after clicking. MCP accepts `clicks` arrays or the legacy `click` string, never both. `-e`/`--hover` runs after all clicks.
+- Repeated `-c`/`--click` selectors run in order, each waiting for visibility and then 500ms after clicking. MCP accepts `clicks` arrays or the legacy `click` string, never both. `-e`/`--hover` runs after all clicks.
 - `-s`/`--expand-select` injects JavaScript that replaces `<select>` elements with visible HTML dropdown overlays so their options appear in the screenshot. Accepts a CSS selector (e.g. `select#country`) or `"*"` for all `<select>` elements. Implemented in `expandSelectElements()`.
 
 ## Constants
@@ -95,6 +95,6 @@ go build -ldflags="-s -w" -trimpath -o sesnap main.go
 
 - Single-file project: all code in `main.go`, tests in `main_test.go`
 - Package-level `var arguments` struct holds all flag pointers
-- `stringSlice` type enables repeated flags (`-u`/`--url`, `-c`/`--chrome-flag`, `-k`/`--click`)
+- `stringSlice` type enables repeated flags (`-u`/`--url`, `-C`/`--chrome-flag`, `-c`/`--click`)
 - Reusable profile cache lives under `~/.sesnap/` (overridable via `SESNAP_CACHE_DIR`); other profile copies are temporary
 - Output numbering for multiple URLs: `<base>_001.png`, `_002.png`, ...

@@ -13,8 +13,8 @@ A web page screenshot tool with parallel multi-URL capture and lock-free Chrome 
 - **Browser-style address bar** – add a realistic address bar with favicon and URL to the top of screenshots (`-b`), perfect for documentation and presentations
     - <img width="50%" height="50%" alt="sample" src="https://github.com/user-attachments/assets/b05a3711-92b4-4e00-bfca-e96cca693d67"/>
 
-- **Click / Hover before capture** – click (`-k`) or hover (`-e`) a CSS selector before taking the screenshot, useful for capturing dropdown menus, tooltips, and other interactive states
-- **Custom Chrome flags** – pass arbitrary Chrome flags with `-c`
+- **Click / Hover before capture** – click (`-c`) or hover (`-e`) a CSS selector before taking the screenshot, useful for capturing dropdown menus, tooltips, and other interactive states
+- **Custom Chrome flags** – pass arbitrary Chrome flags with `-C`
 - **Idempotent execution** – without `-r`, the cached profile is always freshly copied, ensuring consistent results regardless of previous runs
 
 ## Requirements
@@ -59,7 +59,7 @@ sesnap -u <URL> -o /tmp/screenshot.png [options]
 | `-W` | `--width` | `1280` | Viewport width |
 | `-H` | `--height` | `860` | Viewport height |
 | `-e` | `--hover` | `""` | Hover over the first element matching the CSS selector before capture |
-| `-k` | `--click` | — | Click the first element matching the CSS selector before capture; repeat to click in order |
+| `-c` | `--click` | — | Click the first element matching the CSS selector before capture; repeat to click in order |
 | `-a` | `--wait-for` | `""` | Wait for the first element matching this CSS selector to become visible after clicks, before hover and capture |
 | `-s` | `--expand-select` | `""` | Expand `<select>` elements as HTML dropdown overlay before capture. Use CSS selector or `"*"` for all |
 | `-f` | `--full` | `false` | Enable full-page screenshot |
@@ -67,10 +67,23 @@ sesnap -u <URL> -o /tmp/screenshot.png [options]
 | `-d` | `--debug` | `false` | Enable debug mode |
 | `-n` | `--no-headless` | `false` | Disable headless mode (show browser window) |
 | `-r` | `--reuse` | `false` | Reuse cached profile (do not delete after execution) |
-| `-t` | `--parallel` | `NumCPU` | Max number of parallel tabs for screenshot capture |
-| `-T` | `--timeout` | `60` | Timeout seconds per URL, including navigation and interactions |
+| `-j` | `--parallel` | `NumCPU` | Max number of parallel tabs for screenshot capture |
+| `-t` | `--timeout` | `60` | Timeout seconds per URL, including navigation and interactions |
 | `-m` | `--mcp` | `false` | Run as MCP (Model Context Protocol) server over stdio |
-| `-c` | `--chrome-flag` | `""` | Extra Chrome flag as `key=value` (can be specified multiple times) |
+| `-C` | `--chrome-flag` | `""` | Extra Chrome flag as `key=value` (can be specified multiple times) |
+
+### Breaking change: short flags
+
+Long flags are unchanged. Update existing commands and MCP client launch arguments:
+
+| Long flag | Previous short flag | New short flag |
+|-----------|---------------------|----------------|
+| `--click` | `-k` | `-c` |
+| `--chrome-flag` | `-c` | `-C` |
+| `--parallel` | `-t` | `-j` |
+| `--timeout` | `-T` | `-t` |
+
+Old `-c` and `-t` now have different meanings; `-k` and `-T` are no longer accepted. Use long flags in scripts to avoid short-flag changes.
 
 ### Examples
 
@@ -96,13 +109,13 @@ sesnap -u="https://example.com/dashboard" \
 sesnap -u="https://www.example.com/" -b -o=/tmp/with_bar.png
 
 # Custom Chrome flags
-sesnap -u="https://example.com/" -c="lang=ja" -c="disable-extensions" -o=/tmp/example.png
+sesnap -u="https://example.com/" -C="lang=ja" -C="disable-extensions" -o=/tmp/example.png
 
 # Hover over an element before capture (e.g. tooltip)
 sesnap -u="https://example.com/" -e=".tooltip-trigger" -o=/tmp/tooltip.png
 
 # Click an element before capture (e.g. open dropdown menu)
-sesnap -u="https://example.com/" -k=".menu-button" -o=/tmp/menu.png
+sesnap -u="https://example.com/" -c=".menu-button" -o=/tmp/menu.png
 
 # Click a menu button, then a menu item
 sesnap -u="https://example.com/" --click=".menu-button" --click=".menu-item" -o=/tmp/result.png
@@ -114,17 +127,17 @@ sesnap -u="https://example.com/" -s="select#country" -o=/tmp/select.png
 sesnap -u="https://example.com/" -s="*" -o=/tmp/all_selects.png
 
 # Click to open menu, then hover a sub-item
-sesnap -u="https://example.com/" -k=".menu-button" -e=".submenu-item" -o=/tmp/submenu.png
+sesnap -u="https://example.com/" -c=".menu-button" -e=".submenu-item" -o=/tmp/submenu.png
 
 # Click, wait for the destination content, and show the final URL
-sesnap -u="https://example.com/" -k=".next" --wait-for="#ready" -b -o=/tmp/destination.png
+sesnap -u="https://example.com/" -c=".next" --wait-for="#ready" -b -o=/tmp/destination.png
 ```
 
-Repeated `-k` / `--click` flags run in the order supplied, before hover and select expansion. Each click waits for the target to become visible, then waits at least 500ms. If the main frame is still loading, capture waits for loading to stop (up to another 10 seconds), including same-URL reloads and redirects. Actions stay in the original tab; links that open a new tab do not switch the capture target. A failed click stops capture for that URL; the error includes the click number and selector. Commas remain part of the CSS selector, not separators between operations. Empty flags (`--click=""`) retain the legacy no-click behavior; whitespace-only selectors are rejected.
+Repeated `-c` / `--click` flags run in the order supplied, before hover and select expansion. Each click waits for the target to become visible, then waits at least 500ms. If the main frame is still loading, capture waits for loading to stop (up to another 10 seconds), including same-URL reloads and redirects. Actions stay in the original tab; links that open a new tab do not switch the capture target. A failed click stops capture for that URL; the error includes the click number and selector. Commas remain part of the CSS selector, not separators between operations. Empty flags (`--click=""`) retain the legacy no-click behavior; whitespace-only selectors are rejected.
 
 For SPA updates or asynchronous rendering, use `-a` / `--wait-for` with a selector that becomes visible when the desired content is ready. This wait runs after all clicks, before hover and select expansion, and does not change the capture area. It also works without clicks. A missing element fails at the per-URL capture deadline. An already-visible element satisfies the wait immediately; choose a selector specific to the destination state. The 500ms delay alone cannot detect navigation that starts later or guarantee completion of asynchronous requests or animations. `-w` / `--wait` applies only after the initial navigation, not after clicks.
 
-Each URL has a 60-second capture deadline (`-T` / `--timeout` to change it), starting when a capture slot is acquired. Initial navigation commit and document parsing have a separate 10-second limit and do not wait for every resource to load. Failed URLs do not prevent other URLs from completing. Any failure returns a nonzero CLI exit status after cleanup.
+Each URL has a 60-second capture deadline (`-t` / `--timeout` to change it), starting when a capture slot is acquired. Initial navigation commit and document parsing have a separate 10-second limit and do not wait for every resource to load. Failed URLs do not prevent other URLs from completing. Any failure returns a nonzero CLI exit status after cleanup.
 
 ### MCP Server Mode
 
@@ -173,7 +186,7 @@ Each URL uses a separate tab, including simultaneous single-URL requests. The `t
   "mcpServers": {
     "sesnap": {
       "command": "sesnap",
-      "args": ["--mcp", "-t", "4"]
+      "args": ["--mcp", "-j", "4"]
     }
   }
 }

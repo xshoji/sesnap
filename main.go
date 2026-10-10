@@ -68,7 +68,7 @@ const (
 )
 
 var (
-	commandDescription = "A fast, multi-page screenshot tool that requires only Chrome. Supports profile specification without locking your main browser.\n  Set SESNAP_CACHE_DIR to override the default profile cache directory (~/.sesnap).\n  Device scale factor can be changed via -c \"device-scale-factor=1.0\" (default: 2.0 Retina).\n  Custom DNS resolution via -c \"host-resolver-rules=MAP example.com 127.0.0.1\"."
+	commandDescription = "A fast, multi-page screenshot tool that requires only Chrome. Supports profile specification without locking your main browser.\n  Set SESNAP_CACHE_DIR to override the default profile cache directory (~/.sesnap).\n  Device scale factor can be changed via -C \"device-scale-factor=1.0\" (default: 2.0 Retina).\n  Custom DNS resolution via -C \"host-resolver-rules=MAP example.com 127.0.0.1\"."
 	urls               stringSlice
 	chromeFlags        stringSlice
 	clickSelectors     stringSlice
@@ -105,9 +105,9 @@ var (
 		defineFlagValue("d", "debug" /*        */, false /*            */, "Enable debug mode", flag.Bool, flag.BoolVar),
 		defineFlagValue("n", "no-headless" /*  */, false /*            */, "Disable headless mode", flag.Bool, flag.BoolVar),
 		defineFlagValue("r", "reuse" /*        */, false /*            */, "Reuse cached profile (do not delete after execution)", flag.Bool, flag.BoolVar),
-		defineFlagValue("t", "parallel" /*     */, runtime.NumCPU() /* */, "Max number of parallel tabs for screenshot capture", flag.Int, flag.IntVar),
+		defineFlagValue("j", "parallel" /*     */, runtime.NumCPU() /* */, "Max number of parallel tabs for screenshot capture", flag.Int, flag.IntVar),
 		defineFlagValue("m", "mcp" /*          */, false /*            */, "Run as MCP (Model Context Protocol) server over stdio", flag.Bool, flag.BoolVar),
-		defineFlagValue("T", "timeout", int(captureTimeout/time.Second), "Timeout seconds per URL, including navigation and interactions", flag.Int, flag.IntVar),
+		defineFlagValue("t", "timeout", int(captureTimeout/time.Second), "Timeout seconds per URL, including navigation and interactions", flag.Int, flag.IntVar),
 		defineFlagValue("a", "wait-for", "", "Wait for the first element matching this CSS selector to become visible after clicks, before capture", flag.String, flag.StringVar),
 	}
 )
@@ -178,8 +178,8 @@ func (p captureParams) validate() error {
 
 func init() {
 	defineFlagSlice("u", "url", Req+"URL (can be specified multiple times, e.g. -u \"https://xxxx/\" -u \"https://yyyy/\")", &urls)
-	defineFlagSlice("c", "chrome-flag", "Extra Chrome flag as key=value (can be specified multiple times, e.g. -c \"lang=ja\" -c \"disable-extensions\").", &chromeFlags)
-	defineFlagSlice("k", "click", "Click the first matching element before capture; repeat to click selectors in order (e.g. -k .menu-button -k .menu-item)", &clickSelectors)
+	defineFlagSlice("C", "chrome-flag", "Extra Chrome flag as key=value (can be specified multiple times, e.g. -C \"lang=ja\" -C \"disable-extensions\").", &chromeFlags)
+	defineFlagSlice("c", "click", "Click the first matching element before capture; repeat to click selectors in order (e.g. -c .menu-button -c .menu-item)", &clickSelectors)
 	flag.Usage = customUsage(commandDescription)
 }
 
@@ -397,7 +397,7 @@ func newBrowserContext(userDataDir string) (context.Context, func()) {
 		chromedp.Flag("no-default-browser-check", true),
 	)
 
-	// Apply extra Chrome flags from -c options
+	// Apply extra Chrome flags from -C options
 	for _, cf := range chromeFlags {
 		k, v, _ := strings.Cut(cf, "=")
 		if v == "" {

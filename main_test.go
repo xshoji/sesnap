@@ -44,18 +44,38 @@ func TestStringSlice_SetAndString(t *testing.T) {
 	}
 }
 
-func TestClickFlags(t *testing.T) {
-	oldFlags, oldClicks := flag.CommandLine, clickSelectors
-	t.Cleanup(func() { flag.CommandLine, clickSelectors = oldFlags, oldClicks })
-	flag.CommandLine = flag.NewFlagSet("test", flag.ContinueOnError)
-	clickSelectors = nil
-	defineFlagSlice("k", "click", "", &clickSelectors)
-	if err := flag.CommandLine.Parse([]string{"--click=.menu, .fallback", "--click=", "-k=.item", "--click=.menu, .fallback"}); err != nil {
+func TestCaptureFlags(t *testing.T) {
+	oldClicks, oldChrome := clickSelectors, chromeFlags
+	oldParallel, oldTimeout := *arguments.parallel, *arguments.timeoutSeconds
+	t.Cleanup(func() {
+		clickSelectors, chromeFlags = oldClicks, oldChrome
+		*arguments.parallel, *arguments.timeoutSeconds = oldParallel, oldTimeout
+	})
+	clickSelectors, chromeFlags = nil, nil
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	for _, name := range []string{"c", "click", "C", "chrome-flag", "j", "parallel", "t", "timeout"} {
+		f := flag.Lookup(name)
+		if f == nil {
+			t.Fatalf("flag %q is not registered", name)
+		}
+		fs.Var(f.Value, name, "")
+	}
+	if err := fs.Parse([]string{
+		"--click=.menu, .fallback", "--click=", "-c=.item", "--click=.menu, .fallback",
+		"-C=lang=ja", "--chrome-flag=disable-extensions",
+		"--parallel=5", "-j=2", "--timeout=91", "-t=17",
+	}); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{".menu, .fallback", ".item", ".menu, .fallback"}
 	if got := captureParamsFromArgs().clickSelectors; !reflect.DeepEqual(got, want) {
 		t.Fatalf("clicks = %v, want %v", got, want)
+	}
+	if want := (stringSlice{"lang=ja", "disable-extensions"}); !reflect.DeepEqual(chromeFlags, want) {
+		t.Fatalf("chrome flags = %v, want %v", chromeFlags, want)
+	}
+	if *arguments.parallel != 2 || captureParamsFromArgs().timeout != 17*time.Second {
+		t.Fatalf("parallel = %d, timeout = %v", *arguments.parallel, captureParamsFromArgs().timeout)
 	}
 }
 
