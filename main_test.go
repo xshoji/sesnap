@@ -677,7 +677,7 @@ func TestE2E_SelectorEscaping(t *testing.T) {
 	}
 }
 
-func TestE2E_CLIFailureCleanup(t *testing.T) {
+func TestE2E_CLIProfileCleanup(t *testing.T) {
 	skipUnlessE2E(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("<html><body>Captured</body></html>"))
@@ -687,32 +687,103 @@ func TestE2E_CLIFailureCleanup(t *testing.T) {
 	t.Cleanup(func() {
 		arguments, urls, chromeFlags, clickSelectors, deviceScaleFactor = oldArgs, oldURLs, oldFlags, oldClicks, oldScale
 	})
-	output := filepath.Join(t.TempDir(), "result.png")
-	profile := t.TempDir()
-	tempRoot := t.TempDir()
-	t.Setenv("TMPDIR", tempRoot)
-	setOutputPath(output)
-	setProfileDir(profile)
-	setReUseProfile(false)
-	setURLs("http://127.0.0.1:0", srv.URL)
 	wait, parallel := 0, 2
 	arguments.waitSeconds, arguments.parallel = &wait, &parallel
 	clickSelectors = nil
 	deviceScaleFactor = 1
-	if err := run(context.Background()); err == nil {
-		t.Fatal("one failed URL must make CLI fail")
-	} else if !strings.Contains(err.Error(), urls[0]) {
-		t.Fatalf("expected URL capture failure, got: %v", err)
-	}
-	if _, err := os.Stat(strings.TrimSuffix(output, ".png") + "_002.png"); err != nil {
-		t.Fatalf("successful URL was not saved: %v", err)
-	}
-	if _, err := os.Stat(strings.TrimSuffix(output, ".png") + "_001.png"); !os.IsNotExist(err) {
-		t.Fatal("navigation error must not produce a screenshot")
-	}
-	// Chrome may leave temporary directories unrelated to our profile copies.
-	entries, err := filepath.Glob(filepath.Join(tempRoot, "sesnap-userdata-*"))
-	if err != nil || len(entries) != 0 {
-		t.Fatalf("temporary profiles remain after failure: %v, %v", entries, err)
+	for _, scenario := range []string{"success", "partial failure", "locked"} {
+		t.Run(scenario, func(t *testing.T) {
+			t.Setenv("SESNAP_CACHE_DIR", t.TempDir())
+			tempRoot := t.TempDir()
+			t.Setenv("TMPDIR", tempRoot)
+			output := filepath.Join(t.TempDir(), "result.png")
+			profile := filepath.Join(t.TempDir(), "Default")
+			if err := os.Mkdir(profile, 0700); err != nil {
+				t.Fatal(err)
+			}
+			marker := filepath.Join(profile, "auth-marker")
+			if err := os.WriteFile(marker, []byte("old"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			setReUseProfile(true)
+			otherProfile := filepath.Join(t.TempDir(), "Default")
+			if err := os.Mkdir(otherProfile, 0700); err != nil {
+				t.Fatal(err)
+			}
+			setProfileDir(otherProfile)
+			otherCache, err := setupProfileCache()
+			if err != nil {
+				t.Fatal(err)
+			}
+			cleanupProfileCache(otherCache)
+			setProfileDir(profile)
+			cache, err := setupProfileCache()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if scenario != "locked" {
+				cleanupProfileCache(cache)
+			}
+			if err := os.WriteFile(marker, []byte("new"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			setOutputPath(output)
+			setReUseProfile(false)
+			setURLs(srv.URL, srv.URL)
+			if scenario == "partial failure" {
+				urls[0] = "http://127.0.0.1:0"
+			}
+			err = run(context.Background())
+			if scenario == "partial failure" {
+				if err == nil || !strings.Contains(err.Error(), urls[0]) {
+					t.Fatalf("expected URL capture failure, got: %v", err)
+				}
+				if _, err := os.Stat(strings.TrimSuffix(output, ".png") + "_001.png"); !os.IsNotExist(err) {
+					t.Fatal("navigation error must not produce a screenshot")
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(strings.TrimSuffix(output, ".png") + "_002.png"); err != nil {
+				t.Fatalf("successful URL was not saved: %v", err)
+			}
+			entries, err := filepath.Glob(filepath.Join(tempRoot, "sesnap-userdata-*"))
+			if err != nil || len(entries) != 0 {
+				t.Fatalf("temporary profiles remain: %v, %v", entries, err)
+			}
+			if _, err := os.Stat(filepath.Join(otherCache, "Default")); err != nil {
+				t.Fatalf("unrelated profile cache was removed: %v", err)
+			}
+			if scenario == "success" {
+				if _, err := os.Stat(cache); !os.IsNotExist(err) {
+					t.Fatalf("persistent cache remains after success: %v", err)
+				}
+			} else {
+				data, err := os.ReadFile(filepath.Join(cache, "Default", "auth-marker"))
+				if err != nil || string(data) != "old" {
+					t.Fatalf("persistent cache was changed: %q, %v", data, err)
+				}
+			}
+			if scenario == "locked" {
+				if _, err := os.Stat(cache + ".lock"); err != nil {
+					t.Fatalf("active cache lock was removed: %v", err)
+				}
+				return
+			}
+			setReUseProfile(true)
+			rebuilt, err := setupProfileCache()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer cleanupProfileCache(rebuilt)
+			want := "old"
+			if scenario == "success" {
+				want = "new"
+			}
+			data, err := os.ReadFile(filepath.Join(rebuilt, "Default", "auth-marker"))
+			if err != nil || string(data) != want {
+				t.Fatalf("next reuse profile = %q, %v, want %q", data, err, want)
+			}
+		})
 	}
 }

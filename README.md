@@ -135,10 +135,12 @@ Each URL uses a separate tab. `timeout` defaults to 60 seconds; cancellation sto
 
 `-p` copies a [Chrome profile](https://chromium.googlesource.com/chromium/src/+/HEAD/docs/user_data_dir.md) without modifying the original.
 
-- **Without `-r`**: use a temporary copy and delete it after execution.
+- **Without `-r`**: use a fresh temporary copy and delete it after execution. On success, also delete any persistent cache for the same source profile, so the next `-r` run copies the current source profile.
 - **With `-r`**: reuse a persistent copy under `~/.sesnap/`. Set `SESNAP_CACHE_DIR` to override this directory.
 
-Concurrent use of the same persistent cache is rejected; omit `-r` for independent parallel processes. Chrome's `Singleton*` locks are never deleted by sesnap.
+Failed or canceled runs preserve the persistent cache. A cache with an existing sesnap lock is also preserved, with a log message. Caches for other source profiles are not affected.
+
+Concurrent use of the same persistent cache is rejected; omit `-r` for independent parallel processes. Cache deletion takes the same lock to avoid removing a cache in use. Chrome's `Singleton*` locks are never deleted by sesnap.
 
 After forced termination, a cache's `.lock` directory may remain. The error reports its path. Remove only that directory after confirming no sesnap process is using the cache.
 

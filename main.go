@@ -198,7 +198,7 @@ func main() {
 }
 
 // run owns the browser and profile for both CLI and MCP execution.
-func run(ctx context.Context) error {
+func run(ctx context.Context) (err error) {
 	if *arguments.parallel < 1 {
 		return fmt.Errorf("parallel must be at least 1")
 	}
@@ -235,7 +235,12 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer cleanupProfileCache(profileCacheDir)
+	defer func() {
+		cleanupProfileCache(profileCacheDir)
+		if err == nil && ctx.Err() == nil && profileCacheDir != "" && !*arguments.reUseProfile {
+			err = clearProfileCache()
+		}
+	}()
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -339,14 +344,14 @@ func setupProfileCache() (cacheDir string, err error) {
 	profileName := filepath.Base(source)
 	root := ""
 	if *arguments.reUseProfile {
-		root, err = chromeProfileCacheRoot()
+		cacheDir, err = reusableProfilePath()
 		if err != nil {
 			return "", err
 		}
+		root = filepath.Dir(cacheDir)
 		if err := os.MkdirAll(root, 0700); err != nil {
 			return "", err
 		}
-		cacheDir = filepath.Join(root, fmt.Sprintf("userdata-%x", sha256.Sum256([]byte(source))))
 		lockPath := cacheDir + ".lock"
 		// ponytail: crash locks require manual removal; never steal a live cache.
 		if err := os.Mkdir(lockPath, 0700); err != nil {
@@ -359,6 +364,7 @@ func setupProfileCache() (cacheDir string, err error) {
 		}()
 		info, statErr := os.Stat(filepath.Join(cacheDir, profileName))
 		if statErr == nil && info.IsDir() {
+			log.Printf("reuse cached profile: %s", cacheDir)
 			return cacheDir, nil
 		}
 		if !errors.Is(statErr, os.ErrNotExist) {
@@ -377,6 +383,7 @@ func setupProfileCache() (cacheDir string, err error) {
 	if err := os.CopyFS(filepath.Join(staging, profileName), os.DirFS(source)); err != nil {
 		return "", fmt.Errorf("copy profile: %w", err)
 	}
+	log.Printf("copied profile: %s -> %s", source, staging)
 	if *arguments.reUseProfile {
 		if err := os.Rename(staging, cacheDir); err != nil {
 			return "", err
@@ -988,6 +995,44 @@ func cleanupProfileCache(cacheDir string) {
 	if err := os.RemoveAll(cacheDir); err != nil {
 		log.Printf("failed to delete cached profile: %v", err)
 	}
+}
+
+// clearProfileCache leaves active or stale-locked caches untouched.
+func clearProfileCache() error {
+	cacheDir, err := reusableProfilePath()
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(cacheDir); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("stat profile cache: %w", err)
+	}
+	lockPath := cacheDir + ".lock"
+	if err := os.Mkdir(lockPath, 0700); errors.Is(err, os.ErrExist) {
+		log.Printf("keep cached profile (in use or stale lock): %s", cacheDir)
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("lock profile cache for deletion: %w", err)
+	}
+	defer func() {
+		if err := os.Remove(lockPath); err != nil {
+			log.Printf("release profile cache: %v", err)
+		}
+	}()
+	log.Printf("delete persistent profile cache: %s", cacheDir)
+	if err := os.RemoveAll(cacheDir); err != nil {
+		return fmt.Errorf("delete persistent profile cache: %w", err)
+	}
+	return nil
+}
+
+func reusableProfilePath() (string, error) {
+	root, err := chromeProfileCacheRoot()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(root, fmt.Sprintf("userdata-%x", sha256.Sum256([]byte(*arguments.profileDir)))), nil
 }
 
 // chromeProfileCacheRoot returns the root directory for cached Chrome profiles.
