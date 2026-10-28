@@ -47,13 +47,15 @@ func TestStringSlice_SetAndString(t *testing.T) {
 func TestCaptureFlags(t *testing.T) {
 	oldClicks, oldChrome := clickSelectors, chromeFlags
 	oldParallel, oldTimeout := *arguments.parallel, *arguments.timeoutSeconds
+	oldGroup := *arguments.sequentialPerDomain
 	t.Cleanup(func() {
 		clickSelectors, chromeFlags = oldClicks, oldChrome
 		*arguments.parallel, *arguments.timeoutSeconds = oldParallel, oldTimeout
+		*arguments.sequentialPerDomain = oldGroup
 	})
 	clickSelectors, chromeFlags = nil, nil
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
-	for _, name := range []string{"c", "click", "C", "chrome-flag", "j", "parallel", "t", "timeout"} {
+	for _, name := range []string{"c", "click", "C", "chrome-flag", "j", "parallel", "t", "timeout", "S", "sequential-per-domain"} {
 		f := flag.Lookup(name)
 		if f == nil {
 			t.Fatalf("flag %q is not registered", name)
@@ -64,6 +66,7 @@ func TestCaptureFlags(t *testing.T) {
 		"--click=.menu, .fallback", "--click=", "-c=.item", "--click=.menu, .fallback",
 		"-C=lang=ja", "--chrome-flag=disable-extensions",
 		"--parallel=5", "-j=2", "--timeout=91", "-t=17",
+		"--sequential-per-domain=false", "-S=true",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -76,6 +79,34 @@ func TestCaptureFlags(t *testing.T) {
 	}
 	if *arguments.parallel != 2 || captureParamsFromArgs().timeout != 17*time.Second {
 		t.Fatalf("parallel = %d, timeout = %v", *arguments.parallel, captureParamsFromArgs().timeout)
+	}
+	if !captureParamsFromArgs().sequentialPerDomain {
+		t.Fatal("sequential-per-domain was not propagated")
+	}
+}
+
+func TestDomainGroups(t *testing.T) {
+	urls := []string{
+		"https://EXAMPLE.com/first", "https://other.test/",
+		"http://example.com:8080/second", "https://sub.example.com/",
+		"https://example.com./third", "file:///tmp/a", ":invalid", "file:///tmp/b",
+	}
+	for _, tc := range []struct {
+		args map[string]any
+		want [][]int
+	}{
+		{map[string]any{}, [][]int{{0}, {1}, {2}, {3}, {4}, {5}, {6}, {7}}},
+		{map[string]any{"sequential_per_domain": true}, [][]int{{0, 2, 4}, {1}, {3}, {5}, {6}, {7}}},
+	} {
+		var req mcp.CallToolRequest
+		req.Params.Arguments = tc.args
+		p, err := mcpCaptureParams(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := p.urlGroups(urls); !reflect.DeepEqual(got, tc.want) {
+			t.Fatalf("args %v: groups = %v, want %v", tc.args, got, tc.want)
+		}
 	}
 }
 
@@ -534,6 +565,7 @@ func TestMCPInvalidInputs(t *testing.T) {
 		{"wait": -1}, {"wait": 1e100}, {"timeout": 0},
 		{"quality": 101}, {"format": "webp"}, {"output": " "},
 		{"width": "320"}, {"full": "true"},
+		{"sequential_per_domain": "true"},
 		{"wait_for": 1}, {"wait_for": " "},
 	} {
 		if _, ok := args["urls"]; !ok {
@@ -561,6 +593,56 @@ func TestMCPCancelQueued(t *testing.T) {
 	result, err := mcpScreenshotHandler(context.Background(), sem, false)(ctx, req)
 	if err != nil || !result.IsError || len(sem) != 1 {
 		t.Fatalf("queued cancellation: %v, %v", result, err)
+	}
+}
+
+func TestE2E_DomainGroups(t *testing.T) {
+	skipUnlessE2E(t)
+	otherStarted := make(chan struct{}, 1)
+	secondCookie := make(chan string, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		switch r.URL.Path {
+		case "/first":
+			// Another host must run while this group's first capture is active.
+			select {
+			case <-otherStarted:
+			case <-r.Context().Done():
+				return
+			}
+			w.Write([]byte(`<script>setTimeout(() => {
+				document.cookie = 'session=ready; path=/';
+				document.body.innerHTML = '<div id="ready">Logged in</div>';
+			}, 200)</script>`))
+			return
+		case "/second":
+			secondCookie <- r.Header.Get("Cookie")
+		case "/other":
+			otherStarted <- struct{}{}
+		}
+		w.Write([]byte(`<div id="ready">Ready</div>`))
+	}))
+	defer srv.Close()
+	browserCtx, shutdown := startTestBrowser(t)
+	defer shutdown()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	var req mcp.CallToolRequest
+	req.Params.Arguments = map[string]any{
+		"urls":                  []string{srv.URL + "/first", srv.URL + "/second", strings.Replace(srv.URL, "127.0.0.1", "localhost", 1) + "/other"},
+		"sequential_per_domain": true, "wait": 0, "wait_for": "#ready", "width": 320, "height": 240,
+	}
+	result, err := mcpScreenshotHandler(browserCtx, make(chan struct{}, 2), false)(ctx, req)
+	if err != nil || result.IsError || len(result.Content) != 6 {
+		t.Fatalf("grouped capture: %v, %v", result, err)
+	}
+	select {
+	case cookie := <-secondCookie:
+		if !strings.Contains(cookie, "session=ready") {
+			t.Fatalf("second page opened before first page finished login: cookie = %q", cookie)
+		}
+	default:
+		t.Fatal("second page was not opened")
 	}
 }
 
@@ -689,6 +771,8 @@ func TestE2E_CLIProfileCleanup(t *testing.T) {
 	})
 	wait, parallel := 0, 2
 	arguments.waitSeconds, arguments.parallel = &wait, &parallel
+	group := true
+	arguments.sequentialPerDomain = &group
 	clickSelectors = nil
 	deviceScaleFactor = 1
 	for _, scenario := range []string{"success", "partial failure", "locked"} {

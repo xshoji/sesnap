@@ -59,6 +59,7 @@ sesnap -u <URL> -o /tmp/screenshot.png [options]
 | `-n` | `--no-headless` | `false` | Disable headless mode (show browser window) |
 | `-r` | `--reuse` | `false` | Reuse cached profile (do not delete after execution) |
 | `-j` | `--parallel` | `NumCPU` | Max number of parallel tabs for screenshot capture |
+| `-S` | `--sequential-per-domain` | `false` | Capture URLs with the same hostname sequentially in input order; different hostnames remain parallel |
 | `-t` | `--timeout` | `60` | Timeout seconds per URL, including navigation and interactions |
 | `-m` | `--mcp` | `false` | Run as MCP (Model Context Protocol) server over stdio |
 | `-C` | `--chrome-flag` | `""` | Extra Chrome flag as `key=value` (can be specified multiple times) |
@@ -77,6 +78,10 @@ sesnap -u="https://www.example.com/" -f -o=/tmp/fullpage.png
 
 # Multiple URLs (parallel capture)
 sesnap -u="https://www.yahoo.co.jp/" -u="https://www.google.com/" -o=/tmp/sites.png
+
+# Serialize each hostname to avoid concurrent login redirects
+sesnap -S -j=4 -u="https://example.com/dashboard" \
+  -u="https://other.example.org/" -u="https://example.com/settings" -o=/tmp/sites.png
 
 # With Chrome profile (for logged-in sessions)
 sesnap -u="https://example.com/dashboard" \
@@ -99,6 +104,7 @@ After navigation, actions run in this order: clicks → wait-for → hover → s
 - Repeat `-c` to click in order. Each click waits for visibility, then at least 500ms and any detected navigation. Capture stays in the original tab; new tabs are not followed.
 - For asynchronous updates, use `-a` / `--wait-for` with a selector specific to the desired state. It waits for visibility without cropping. `-w` applies only after initial navigation.
 - Each URL has a 60-second deadline (`-t` / `--timeout`), starting when a capture slot is acquired; initial navigation has a separate 10-second limit. A failed URL does not stop other URLs, but any failure returns a nonzero exit status.
+- `-S` / `--sequential-per-domain` groups input URLs by hostname (case-insensitive, ignoring a trailing dot, scheme, and port). Subdomains are separate groups. Within each group, the next tab opens only after the previous capture finishes and its tab closes, even after a failure. Different groups share the `-j` limit; output numbering still follows input order. Grouping uses the input URL, not redirect destinations, so different hosts sharing an identity provider can still overlap during login.
 
 ### MCP Server Mode
 
@@ -130,6 +136,8 @@ Screenshot request example:
 `urls` is required and must be nonempty; `screenshot_to_file` also requires `output`. Use either `clicks` or the legacy single `click`, never both. `wait_for` waits for visibility without cropping; `address_bar` shows the URL at capture time.
 
 Each URL uses a separate tab. `timeout` defaults to 60 seconds; cancellation stops active and queued captures. Any capture or file-write failure sets `isError: true`, while successful results remain in the response.
+
+Set `"sequential_per_domain": true` on either screenshot tool to enable the same hostname grouping within that request (default: `false`). Separate MCP requests are not grouped together.
 
 ### Chrome Profiles
 

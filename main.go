@@ -16,6 +16,7 @@ import (
 	"image/png"
 	"log"
 	"math"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -74,23 +75,24 @@ var (
 	clickSelectors     stringSlice
 	deviceScaleFactor  = 2.0
 	arguments          = struct {
-		outputPath     *string
-		querySelector  *string
-		profileDir     *string
-		waitSeconds    *int
-		windowWidth    *int64
-		windowHeight   *int64
-		hoverSelector  *string
-		expandSelect   *string
-		fullScreenshot *bool
-		showAddressBar *bool
-		debug          *bool
-		noHeadless     *bool
-		reUseProfile   *bool
-		parallel       *int
-		mcpMode        *bool
-		timeoutSeconds *int
-		waitSelector   *string
+		outputPath          *string
+		querySelector       *string
+		profileDir          *string
+		waitSeconds         *int
+		windowWidth         *int64
+		windowHeight        *int64
+		hoverSelector       *string
+		expandSelect        *string
+		fullScreenshot      *bool
+		showAddressBar      *bool
+		debug               *bool
+		noHeadless          *bool
+		reUseProfile        *bool
+		parallel            *int
+		mcpMode             *bool
+		timeoutSeconds      *int
+		waitSelector        *string
+		sequentialPerDomain *bool
 	}{
 		defineFlagValue("o", "output" /*       */, "" /*               */, Req+"Output path of screenshot (with multiple URLs, auto-numbered: <base>_001.png, _002.png, ...)", flag.String, flag.StringVar),
 		defineFlagValue("q", "query" /*        */, "" /*               */, "Query selector. Screenshot the first matching element. ( e.g. -q=\".className#id\" )", flag.String, flag.StringVar),
@@ -109,23 +111,25 @@ var (
 		defineFlagValue("m", "mcp" /*          */, false /*            */, "Run as MCP (Model Context Protocol) server over stdio", flag.Bool, flag.BoolVar),
 		defineFlagValue("t", "timeout", int(captureTimeout/time.Second), "Timeout seconds per URL, including navigation and interactions", flag.Int, flag.IntVar),
 		defineFlagValue("a", "wait-for", "", "Wait for the first element matching this CSS selector to become visible after clicks, before capture", flag.String, flag.StringVar),
+		defineFlagValue("S", "sequential-per-domain", false, "Capture URLs with the same hostname sequentially in input order; different hostnames remain parallel", flag.Bool, flag.BoolVar),
 	}
 )
 
 // captureParams holds per-request screenshot parameters, decoupled from global flags.
 type captureParams struct {
-	windowWidth    int64
-	windowHeight   int64
-	waitSeconds    int
-	querySelector  string
-	clickSelectors []string
-	waitSelector   string
-	hoverSelector  string
-	expandSelect   string
-	fullScreenshot bool
-	showAddressBar bool
-	scaleFactor    float64
-	timeout        time.Duration
+	windowWidth         int64
+	windowHeight        int64
+	waitSeconds         int
+	querySelector       string
+	clickSelectors      []string
+	waitSelector        string
+	hoverSelector       string
+	expandSelect        string
+	fullScreenshot      bool
+	showAddressBar      bool
+	scaleFactor         float64
+	timeout             time.Duration
+	sequentialPerDomain bool
 }
 
 func captureParamsFromArgs() captureParams {
@@ -137,19 +141,42 @@ func captureParamsFromArgs() captureParams {
 		}
 	}
 	return captureParams{
-		windowWidth:    *arguments.windowWidth,
-		windowHeight:   *arguments.windowHeight,
-		waitSeconds:    *arguments.waitSeconds,
-		querySelector:  *arguments.querySelector,
-		clickSelectors: selectors,
-		waitSelector:   *arguments.waitSelector,
-		hoverSelector:  *arguments.hoverSelector,
-		expandSelect:   *arguments.expandSelect,
-		fullScreenshot: *arguments.fullScreenshot,
-		showAddressBar: *arguments.showAddressBar,
-		scaleFactor:    deviceScaleFactor,
-		timeout:        time.Duration(*arguments.timeoutSeconds) * time.Second,
+		windowWidth:         *arguments.windowWidth,
+		windowHeight:        *arguments.windowHeight,
+		waitSeconds:         *arguments.waitSeconds,
+		querySelector:       *arguments.querySelector,
+		clickSelectors:      selectors,
+		waitSelector:        *arguments.waitSelector,
+		hoverSelector:       *arguments.hoverSelector,
+		expandSelect:        *arguments.expandSelect,
+		fullScreenshot:      *arguments.fullScreenshot,
+		showAddressBar:      *arguments.showAddressBar,
+		scaleFactor:         deviceScaleFactor,
+		timeout:             time.Duration(*arguments.timeoutSeconds) * time.Second,
+		sequentialPerDomain: *arguments.sequentialPerDomain,
 	}
+}
+
+// urlGroups preserves input order within each host without occupying capture slots while queued.
+func (p captureParams) urlGroups(urls []string) [][]int {
+	var groups [][]int
+	hosts := make(map[string]int)
+	for i, raw := range urls {
+		u, err := url.Parse(raw)
+		host := ""
+		if err == nil {
+			host = strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
+		}
+		if p.sequentialPerDomain && host != "" {
+			if group, ok := hosts[host]; ok {
+				groups[group] = append(groups[group], i)
+				continue
+			}
+			hosts[host] = len(groups)
+		}
+		groups = append(groups, []int{i})
+	}
+	return groups
 }
 
 func (p captureParams) validate() error {
@@ -259,17 +286,20 @@ func run(ctx context.Context) (err error) {
 	}
 	logSettings(profileCacheDir)
 	results := make(chan error, len(urls))
-	for i, u := range urls {
+	for _, group := range params.urlGroups(urls) {
 		go func() {
-			log.Printf("[%d/%d] capturing: %s", i+1, len(urls), u)
-			buf, err := captureTab(ctx, browserCtx, sem, u, params)
-			if err == nil {
-				err = saveImage(outputPath(i), buf)
+			for _, i := range group {
+				u := urls[i]
+				log.Printf("[%d/%d] capturing: %s", i+1, len(urls), u)
+				buf, err := captureTab(ctx, browserCtx, sem, u, params)
+				if err == nil {
+					err = saveImage(outputPath(i), buf)
+				}
+				if err != nil {
+					err = fmt.Errorf("capture %s: %w", u, err)
+				}
+				results <- err
 			}
-			if err != nil {
-				err = fmt.Errorf("capture %s: %w", u, err)
-			}
-			results <- err
 		}()
 	}
 	var failures []error
@@ -1167,6 +1197,7 @@ func runMCPServer(ctx, browserCtx context.Context, sem chan struct{}) error {
 		mcp.WithNumber("quality", mcp.Description("JPEG quality 1-100 (default: 80, only used with format=jpeg)")),
 		mcp.WithNumber("scale", mcp.Description("Device scale factor (default: 1.0)")),
 		mcp.WithNumber("timeout", mcp.Description("Timeout seconds per URL (default: 60)")),
+		mcp.WithBoolean("sequential_per_domain", mcp.Description("Capture URLs with the same hostname sequentially in input order within this request; different hostnames remain parallel (default: false)")),
 	}
 	s.AddTool(mcp.NewTool("screenshot", append(options, mcp.WithDescription("Take screenshots of web pages and return images directly."))...), mcpScreenshotHandler(browserCtx, sem, false))
 
@@ -1240,7 +1271,7 @@ func mcpCaptureParams(request mcp.CallToolRequest) (captureParams, error) {
 			}
 		}
 	}
-	for _, key := range []string{"full", "address_bar"} {
+	for _, key := range []string{"full", "address_bar", "sequential_per_domain"} {
 		if raw, ok := args[key]; ok {
 			if _, ok := raw.(bool); !ok {
 				return captureParams{}, fmt.Errorf("%s must be a boolean", key)
@@ -1271,18 +1302,19 @@ func mcpCaptureParams(request mcp.CallToolRequest) (captureParams, error) {
 	}
 
 	p := captureParams{
-		windowWidth:    int64(values["width"]),
-		windowHeight:   int64(values["height"]),
-		waitSeconds:    int(values["wait"]),
-		querySelector:  request.GetString("query", ""),
-		clickSelectors: selectors,
-		waitSelector:   request.GetString("wait_for", ""),
-		hoverSelector:  request.GetString("hover", ""),
-		expandSelect:   request.GetString("expand_select", ""),
-		fullScreenshot: request.GetBool("full", false),
-		showAddressBar: request.GetBool("address_bar", false),
-		scaleFactor:    values["scale"],
-		timeout:        time.Duration(values["timeout"]) * time.Second,
+		windowWidth:         int64(values["width"]),
+		windowHeight:        int64(values["height"]),
+		waitSeconds:         int(values["wait"]),
+		querySelector:       request.GetString("query", ""),
+		clickSelectors:      selectors,
+		waitSelector:        request.GetString("wait_for", ""),
+		hoverSelector:       request.GetString("hover", ""),
+		expandSelect:        request.GetString("expand_select", ""),
+		fullScreenshot:      request.GetBool("full", false),
+		showAddressBar:      request.GetBool("address_bar", false),
+		scaleFactor:         values["scale"],
+		timeout:             time.Duration(values["timeout"]) * time.Second,
+		sequentialPerDomain: request.GetBool("sequential_per_domain", false),
 	}
 	return p, p.validate()
 }
@@ -1332,11 +1364,13 @@ func mcpScreenshotHandler(browserCtx context.Context, sem chan struct{}, toFile 
 		}
 		results := make(chan captureResult, len(reqURLs))
 
-		for i, u := range reqURLs {
-			go func(i int, u string) {
-				buf, captureErr := captureTab(ctx, browserCtx, sem, u, p)
-				results <- captureResult{i, buf, captureErr}
-			}(i, u)
+		for _, group := range p.urlGroups(reqURLs) {
+			go func() {
+				for _, i := range group {
+					buf, captureErr := captureTab(ctx, browserCtx, sem, reqURLs[i], p)
+					results <- captureResult{i, buf, captureErr}
+				}
+			}()
 		}
 
 		// Collect results in order
