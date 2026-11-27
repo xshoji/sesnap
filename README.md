@@ -55,6 +55,8 @@ sesnap -u <URL> -o /tmp/screenshot.png [options]
 | `-s` | `--expand-select` | `""` | Expand `<select>` elements as HTML dropdown overlay before capture. Use CSS selector or `"*"` for all |
 | `-f` | `--full` | `false` | Enable full-page screenshot |
 | `-b` | `--address-bar` | `false` | Add browser-style address bar (favicon + actual browser URL at capture time) to the top of screenshot |
+| `-T` | `--crop-by-text` | — | Find rendered HTML text and stack a crop for each match |
+| `-Y` | `--crop-height` | `0` | Height per match in CSS pixels; `0` keeps 180 CSS pixels above and below the match where available |
 | `-d` | `--debug` | `false` | Enable debug mode |
 | `-n` | `--no-headless` | `false` | Disable headless mode (show browser window) |
 | `-r` | `--reuse` | `false` | Reuse cached profile (do not delete after execution) |
@@ -106,6 +108,19 @@ After navigation, actions run in this order: clicks → wait-for → hover → s
 - Each URL has a 60-second deadline (`-t` / `--timeout`), starting when a capture slot is acquired; initial navigation has a separate 10-second limit. A failed URL does not stop other URLs, but any failure returns a nonzero exit status.
 - `-S` / `--sequential-per-domain` groups input URLs by hostname (case-insensitive, ignoring a trailing dot, scheme, and port). Subdomains are separate groups. Within each group, the next tab opens only after the previous capture finishes and its tab closes, even after a failure. Different groups share the `-j` limit; output numbering still follows input order. Grouping uses the input URL, not redirect destinations, so different hosts sharing an identity provider can still overlap during login.
 
+### Crop by text
+
+```bash
+sesnap -u 'https://example.com/report' -b --crop-by-text '合計金額' \
+  --crop-height 320 -o total.png
+```
+
+Chrome searches rendered text in the main document, case-sensitively and without regular expressions. No extra tools or language data are needed. Text drawn in images or canvases is not searchable.
+
+In viewport mode sesnap scrolls to matches, including ones below the fold. With `-f` or `-q`, matches are limited to the full-page capture area or the selected element, respectively. Each match retains the capture area's full width. A positive height centers the crop on the match, shifting it inward at the edges where necessary. The crops are stacked in search order into one image per URL. With `-b`, the address bar is added once at the top; it is not searched or counted in the crop height.
+
+No match is a capture error for that URL; no image is written for it. Other URLs still run.
+
 ### MCP Server Mode
 
 Run `sesnap --mcp` as an [MCP](https://modelcontextprotocol.io) server over stdio. Chrome stays running across requests. Client configuration (e.g. `claude_desktop_config.json`):
@@ -138,6 +153,8 @@ Screenshot request example:
 Each URL uses a separate tab. `timeout` defaults to 60 seconds; cancellation stops active and queued captures. Any capture or file-write failure sets `isError: true`, while successful results remain in the response.
 
 Set `"sequential_per_domain": true` on either screenshot tool to enable the same hostname grouping within that request (default: `false`). Separate MCP requests are not grouped together.
+
+Both screenshot tools accept `crop_by_text` and `crop_height` with the same semantics as the CLI flags. Set `address_bar: true` to keep the bar above the crops.
 
 ### Chrome Profiles
 

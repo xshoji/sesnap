@@ -58,6 +58,7 @@ const (
 	defaultHeight  int64 = 860
 	defaultWait          = 3
 	defaultQuality       = 80
+	cropMargin           = 180 // CSS pixels above and below the matched line
 	// maxPhysicalDim is Chrome's GPU texture limit in physical pixels.
 	// The actual CSS pixel limit depends on deviceScaleFactor.
 	maxPhysicalDim    int64 = 16384
@@ -93,6 +94,8 @@ var (
 		timeoutSeconds      *int
 		waitSelector        *string
 		sequentialPerDomain *bool
+		cropByText          *string
+		cropHeight          *int64
 	}{
 		defineFlagValue("o", "output" /*       */, "" /*               */, Req+"Output path of screenshot (with multiple URLs, auto-numbered: <base>_001.png, _002.png, ...)", flag.String, flag.StringVar),
 		defineFlagValue("q", "query" /*        */, "" /*               */, "Query selector. Screenshot the first matching element. ( e.g. -q=\".className#id\" )", flag.String, flag.StringVar),
@@ -112,6 +115,8 @@ var (
 		defineFlagValue("t", "timeout", int(captureTimeout/time.Second), "Timeout seconds per URL, including navigation and interactions", flag.Int, flag.IntVar),
 		defineFlagValue("a", "wait-for", "", "Wait for the first element matching this CSS selector to become visible after clicks, before capture", flag.String, flag.StringVar),
 		defineFlagValue("S", "sequential-per-domain", false, "Capture URLs with the same hostname sequentially in input order; different hostnames remain parallel", flag.Bool, flag.BoolVar),
+		defineFlagValue("T", "crop-by-text", "", "Find rendered HTML text and stack a crop for each match", flag.String, flag.StringVar),
+		defineFlagValue("Y", "crop-height", 0, fmt.Sprintf("Height per match in CSS pixels (0 keeps %d CSS pixels above and below)", cropMargin), flag.Int64, flag.Int64Var),
 	}
 )
 
@@ -130,6 +135,8 @@ type captureParams struct {
 	scaleFactor         float64
 	timeout             time.Duration
 	sequentialPerDomain bool
+	cropByText          string
+	cropHeight          int64
 }
 
 func captureParamsFromArgs() captureParams {
@@ -154,6 +161,8 @@ func captureParamsFromArgs() captureParams {
 		scaleFactor:         deviceScaleFactor,
 		timeout:             time.Duration(*arguments.timeoutSeconds) * time.Second,
 		sequentialPerDomain: *arguments.sequentialPerDomain,
+		cropByText:          *arguments.cropByText,
+		cropHeight:          *arguments.cropHeight,
 	}
 }
 
@@ -194,6 +203,15 @@ func (p captureParams) validate() error {
 	}
 	if p.waitSelector != "" && strings.TrimSpace(p.waitSelector) == "" {
 		return fmt.Errorf("wait-for selector must not be blank")
+	}
+	if p.cropByText != "" && (strings.TrimSpace(p.cropByText) == "" || strings.ContainsAny(p.cropByText, "\r\n")) {
+		return fmt.Errorf("crop text must be nonblank and on one line")
+	}
+	if p.cropHeight < 0 || p.cropHeight > math.MaxInt32 {
+		return fmt.Errorf("crop height is out of range")
+	}
+	if p.cropByText == "" && p.cropHeight != 0 {
+		return fmt.Errorf("crop height requires text to match")
 	}
 	for i, sel := range p.clickSelectors {
 		if strings.TrimSpace(sel) == "" {
@@ -579,7 +597,7 @@ func takeScreenshot(ctx context.Context, url string, p captureParams) ([]byte, e
 		)
 	default:
 		tasks = append(tasks, chromedp.ActionFunc(func(ctx context.Context) error {
-			data, err := captureViewport(ctx, nil)
+			data, err := captureRegion(ctx, p, nil)
 			if err != nil {
 				return err
 			}
@@ -699,7 +717,7 @@ func captureFullPage(ctx context.Context, p captureParams) ([]byte, error) {
 	).Do(ctx); err != nil {
 		return nil, err
 	}
-	return captureViewport(ctx, nil)
+	return captureRegion(ctx, p, nil)
 }
 
 // captureElement expands the viewport to contain the target element, then
@@ -734,7 +752,7 @@ func captureElement(ctx context.Context, selector string, p captureParams) ([]by
 	if rx < 0 || ry < 0 || width <= 0 || height <= 0 {
 		return nil, fmt.Errorf("element is outside the capture viewport")
 	}
-	return captureViewport(ctx, &page.Viewport{
+	return captureRegion(ctx, p, &page.Viewport{
 		X: rx, Y: ry,
 		Width:  width,
 		Height: height,
@@ -750,6 +768,125 @@ func captureViewport(ctx context.Context, clip *page.Viewport) ([]byte, error) {
 		action = action.WithClip(clip)
 	}
 	return action.Do(ctx)
+}
+
+func captureRegion(ctx context.Context, p captureParams, clip *page.Viewport) ([]byte, error) {
+	if p.cropByText == "" {
+		return captureViewport(ctx, clip)
+	}
+	selector := ""
+	if clip != nil {
+		selector = p.querySelector
+	}
+	args, _ := json.Marshal([]any{p.cropByText, selector, p.fullScreenshot || clip != nil})
+	// Keep the last match in a tab-local closure so the selection can be cleared for every capture.
+	iterator, exception, err := cdpruntime.Evaluate(`(([text, selector, fixedViewport]) => {
+		const root = selector ? document.querySelector(selector) : document.body;
+		const selection = window.getSelection();
+		let previous = document.createRange();
+		previous.selectNodeContents(root);
+		previous.collapse(true);
+		return (x, y, w, h) => {
+			selection.removeAllRanges();
+			selection.addRange(previous);
+			while (window.find(text, true, false, false, false, false, false)) {
+				if (!selection.rangeCount) return [];
+				const match = selection.getRangeAt(0).cloneRange();
+				selection.removeAllRanges();
+				if (!root.contains(match.commonAncestorContainer) || match.collapsed) return [];
+				previous = match;
+				let r = match.getBoundingClientRect();
+				if (fixedViewport) {
+					window.scrollTo({top: 0, left: 0, behavior: 'instant'});
+				} else {
+					const scroll = window.scrollY;
+					window.scrollBy({top: (r.top + r.bottom - innerHeight) / 2, behavior: 'instant'});
+					const moved = match.getBoundingClientRect();
+					if (moved.bottom <= 0 || moved.top >= innerHeight) {
+						window.scrollTo({top: scroll, behavior: 'instant'});
+					}
+				}
+				r = match.getBoundingClientRect();
+				if (r.width > 0 && r.height > 0 && r.right > x && r.left < x + (w || innerWidth) &&
+					r.bottom > y && r.top < y + (h || innerHeight)) return [r.top - y, r.bottom - y];
+				selection.addRange(previous);
+			}
+			selection.removeAllRanges();
+			return [];
+		};
+	})(` + string(args) + `)`).Do(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if exception != nil {
+		return nil, fmt.Errorf("initialize text search: %w", exception)
+	}
+	defer func() { _ = cdpruntime.ReleaseObject(iterator.ObjectID).Do(ctx) }()
+
+	var x, y, w, h float64
+	if clip != nil {
+		x, y, w, h = clip.X, clip.Y, clip.Width, clip.Height
+	}
+	var strips []*image.RGBA
+	var totalHeight int
+	advance := fmt.Sprintf("function() { return this(%f,%f,%f,%f); }", x, y, w, h)
+	for {
+		result, exception, err := cdpruntime.CallFunctionOn(advance).
+			WithObjectID(iterator.ObjectID).WithReturnByValue(true).Do(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if exception != nil {
+			return nil, fmt.Errorf("search HTML text: %w", exception)
+		}
+		var line []float64
+		if err := json.Unmarshal(result.Value, &line); err != nil {
+			return nil, err
+		}
+		if len(line) == 0 {
+			break
+		}
+		buf, err := captureViewport(ctx, clip)
+		if err != nil {
+			return nil, err
+		}
+		img, err := png.Decode(bytes.NewReader(buf))
+		if err != nil {
+			return nil, err
+		}
+		w, h := img.Bounds().Dx(), img.Bounds().Dy()
+		top := max(0, int(math.Floor((line[0]-cropMargin)*p.scaleFactor)))
+		bottom := min(h, int(math.Ceil((line[1]+cropMargin)*p.scaleFactor)))
+		if p.cropHeight > 0 {
+			height := int(min(float64(h), max(1, math.Round(float64(p.cropHeight)*p.scaleFactor))))
+			top = min(max(0, int(math.Floor(((line[0]+line[1])*p.scaleFactor-float64(height))/2))), h-height)
+			bottom = top + height
+		}
+		totalHeight += bottom - top
+		if int64(w)*int64(totalHeight) > maxPhysicalDim*maxPhysicalDim {
+			return nil, fmt.Errorf("cropped image is too large; reduce crop height or narrow the search")
+		}
+		strip := image.NewRGBA(image.Rect(0, 0, w, bottom-top))
+		draw.Draw(strip, strip.Bounds(), img, image.Pt(0, top), draw.Src)
+		strips = append(strips, strip)
+	}
+	if len(strips) == 0 {
+		return nil, fmt.Errorf("text not found in capture area: %q", p.cropByText)
+	}
+	result := strips[0]
+	if len(strips) > 1 {
+		result = image.NewRGBA(image.Rect(0, 0, result.Bounds().Dx(), totalHeight))
+		y := 0
+		for _, strip := range strips {
+			draw.Draw(result, strip.Bounds().Add(image.Pt(0, y)), strip, image.Point{}, draw.Src)
+			y += strip.Bounds().Dy()
+		}
+	}
+	var out bytes.Buffer
+	if err := png.Encode(&out, result); err != nil {
+		return nil, fmt.Errorf("encode cropped screenshot: %w", err)
+	}
+	return out.Bytes(), ctx.Err()
 }
 
 // expandSelectElements injects JavaScript that replaces <select> elements
@@ -1193,6 +1330,8 @@ func runMCPServer(ctx, browserCtx context.Context, sem chan struct{}) error {
 		mcp.WithString("hover", mcp.Description("Hover over the first element matching this CSS selector before capture")),
 		mcp.WithString("expand_select", mcp.Description("Expand <select> elements as HTML overlay. Use CSS selector or \"*\" for all")),
 		mcp.WithBoolean("address_bar", mcp.Description("Add browser-style address bar to screenshot (default: false)")),
+		mcp.WithString("crop_by_text", mcp.Description("Find rendered HTML text and stack a crop for each match")),
+		mcp.WithNumber("crop_height", mcp.Description(fmt.Sprintf("Height per match in CSS pixels (0 keeps %d CSS pixels above and below)", cropMargin))),
 		mcp.WithString("format", mcp.Description("Image format: \"png\" or \"jpeg\" (default: \"png\")")),
 		mcp.WithNumber("quality", mcp.Description("JPEG quality 1-100 (default: 80, only used with format=jpeg)")),
 		mcp.WithNumber("scale", mcp.Description("Device scale factor (default: 1.0)")),
@@ -1246,6 +1385,7 @@ func mcpCaptureParams(request mcp.CallToolRequest) (captureParams, error) {
 		{"timeout", captureTimeout.Seconds(), 1, float64(maxWaitSeconds)},
 		{"quality", defaultQuality, 1, 100},
 		{"scale", 1, 0, float64(maxPhysicalDim)},
+		{"crop_height", 0, 0, math.MaxInt32},
 	} {
 		value := spec.fallback
 		if raw, ok := args[spec.key]; ok {
@@ -1264,7 +1404,7 @@ func mcpCaptureParams(request mcp.CallToolRequest) (captureParams, error) {
 		}
 		values[spec.key] = value
 	}
-	for _, key := range []string{"query", "click", "wait_for", "hover", "expand_select", "format", "output"} {
+	for _, key := range []string{"query", "click", "wait_for", "hover", "expand_select", "format", "output", "crop_by_text"} {
 		if raw, ok := args[key]; ok {
 			if _, ok := raw.(string); !ok {
 				return captureParams{}, fmt.Errorf("%s must be a string", key)
@@ -1315,6 +1455,8 @@ func mcpCaptureParams(request mcp.CallToolRequest) (captureParams, error) {
 		scaleFactor:         values["scale"],
 		timeout:             time.Duration(values["timeout"]) * time.Second,
 		sequentialPerDomain: request.GetBool("sequential_per_domain", false),
+		cropByText:          request.GetString("crop_by_text", ""),
+		cropHeight:          int64(values["crop_height"]),
 	}
 	return p, p.validate()
 }

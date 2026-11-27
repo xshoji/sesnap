@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/base64"
 	"flag"
+	"image"
+	"image/color"
 	"image/png"
 	"math"
 	"net"
@@ -48,14 +50,16 @@ func TestCaptureFlags(t *testing.T) {
 	oldClicks, oldChrome := clickSelectors, chromeFlags
 	oldParallel, oldTimeout := *arguments.parallel, *arguments.timeoutSeconds
 	oldGroup := *arguments.sequentialPerDomain
+	oldText, oldHeight := *arguments.cropByText, *arguments.cropHeight
 	t.Cleanup(func() {
 		clickSelectors, chromeFlags = oldClicks, oldChrome
 		*arguments.parallel, *arguments.timeoutSeconds = oldParallel, oldTimeout
 		*arguments.sequentialPerDomain = oldGroup
+		*arguments.cropByText, *arguments.cropHeight = oldText, oldHeight
 	})
 	clickSelectors, chromeFlags = nil, nil
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
-	for _, name := range []string{"c", "click", "C", "chrome-flag", "j", "parallel", "t", "timeout", "S", "sequential-per-domain"} {
+	for _, name := range []string{"c", "click", "C", "chrome-flag", "j", "parallel", "t", "timeout", "S", "sequential-per-domain", "T", "crop-by-text", "Y", "crop-height"} {
 		f := flag.Lookup(name)
 		if f == nil {
 			t.Fatalf("flag %q is not registered", name)
@@ -67,6 +71,7 @@ func TestCaptureFlags(t *testing.T) {
 		"-C=lang=ja", "--chrome-flag=disable-extensions",
 		"--parallel=5", "-j=2", "--timeout=91", "-t=17",
 		"--sequential-per-domain=false", "-S=true",
+		"--crop-by-text=合計金額", "--crop-height=315",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -82,6 +87,17 @@ func TestCaptureFlags(t *testing.T) {
 	}
 	if !captureParamsFromArgs().sequentialPerDomain {
 		t.Fatal("sequential-per-domain was not propagated")
+	}
+	p := captureParamsFromArgs()
+	if p.cropByText != "合計金額" || p.cropHeight != 315 {
+		t.Fatalf("crop flags were not propagated: %+v", p)
+	}
+	if err := fs.Parse([]string{"-T=請求額", "-Y=92"}); err != nil {
+		t.Fatal(err)
+	}
+	p = captureParamsFromArgs()
+	if p.cropByText != "請求額" || p.cropHeight != 92 || p.timeout != 17*time.Second {
+		t.Fatalf("crop aliases did not update crop options independently of timeout: %+v", p)
 	}
 }
 
@@ -557,6 +573,81 @@ func TestE2E_ScreenshotModes(t *testing.T) {
 	}
 }
 
+func TestE2E_CropByText(t *testing.T) {
+	skipUnlessE2E(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Write([]byte(`<style>body{margin:0} section{height:180px;padding:0 30px;font:32px/60px sans-serif}
+        main{width:420px;margin-left:53px} .gap{height:620px}</style>
+        <div hidden>合計金額</div>
+        <section style="background:#fef1dc">合計<strong>金額</strong></section>
+        <div class="gap"></div>
+        <main><section style="background:#e3f5e9">合計金額</section></main>
+        <section style="background:#e5ecfc">合計金額</section>`))
+	}))
+	defer srv.Close()
+	browserCtx, shutdown := startTestBrowser(t)
+	defer shutdown()
+	for _, tc := range []struct {
+		name, needle, selector string
+		full, bar              bool
+		width                  int
+		colors                 []color.RGBA
+	}{
+		{"viewport", "合計金額", "", false, true, 640, []color.RGBA{{254, 241, 220, 255}, {227, 245, 233, 255}, {229, 236, 252, 255}}},
+		{"full page", "合計金額", "", true, false, 640, []color.RGBA{{254, 241, 220, 255}, {227, 245, 233, 255}, {229, 236, 252, 255}}},
+		{"element", "合計金額", "main", false, false, 420, []color.RGBA{{227, 245, 233, 255}}},
+		{"missing", "missing", "", false, false, 0, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const height = 84
+			var req mcp.CallToolRequest
+			req.Params.Arguments = map[string]any{
+				"urls": []string{srv.URL}, "width": 640, "height": 420, "scale": 2, "wait": 0,
+				"crop_by_text": tc.needle, "crop_height": height, "address_bar": tc.bar, "query": tc.selector, "full": tc.full,
+			}
+			result, err := mcpScreenshotHandler(browserCtx, make(chan struct{}, 1), false)(context.Background(), req)
+			if err != nil || result == nil {
+				t.Fatalf("result = %v, error = %v", result, err)
+			}
+			if len(tc.colors) == 0 {
+				if !result.IsError || !strings.Contains(result.Content[0].(mcp.TextContent).Text, `text not found in capture area: "missing"`) {
+					t.Fatalf("expected a no-match error, got %+v", result)
+				}
+				return
+			}
+			if result.IsError {
+				t.Fatalf("crop failed: %+v", result.Content)
+			}
+			var data string
+			for _, item := range result.Content {
+				if img, ok := item.(mcp.ImageContent); ok {
+					data = img.Data
+				}
+			}
+			img, err := png.Decode(base64.NewDecoder(base64.StdEncoding, strings.NewReader(data)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			bar := 0
+			if tc.bar {
+				bar = 52 * 2
+				if color.RGBAModel.Convert(img.At(2, 2)) != (color.RGBA{222, 225, 230, 255}) {
+					t.Fatal("address bar is missing above the page crop")
+				}
+			}
+			if want := image.Rect(0, 0, 2*tc.width, 2*height*len(tc.colors)+bar); img.Bounds() != want {
+				t.Fatalf("bounds = %v, want %v", img.Bounds(), want)
+			}
+			for i, want := range tc.colors {
+				if got := color.RGBAModel.Convert(img.At(760, bar+2*height*i+height)); got != want {
+					t.Errorf("match %d background = %v, want %v", i+1, got, want)
+				}
+			}
+		})
+	}
+}
+
 func TestMCPInvalidInputs(t *testing.T) {
 	for _, args := range []map[string]any{
 		{"urls": []string{}}, {"urls": []string{" "}},
@@ -567,6 +658,8 @@ func TestMCPInvalidInputs(t *testing.T) {
 		{"width": "320"}, {"full": "true"},
 		{"sequential_per_domain": "true"},
 		{"wait_for": 1}, {"wait_for": " "},
+		{"crop_by_text": 1}, {"crop_by_text": " "}, {"crop_by_text": "foo\nbar"},
+		{"crop_height": 12}, {"crop_by_text": "foo", "crop_height": 10.5}, {"crop_by_text": "foo", "crop_height": -1},
 	} {
 		if _, ok := args["urls"]; !ok {
 			args["urls"] = []string{"http://example.com"}
