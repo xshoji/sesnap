@@ -56,7 +56,7 @@ sesnap -u <URL> -o /tmp/screenshot.png [options]
 | `-f` | `--full` | `false` | Enable full-page screenshot |
 | `-b` | `--address-bar` | `false` | Add browser-style address bar (favicon + actual browser URL at capture time) to the top of screenshot |
 | `-T` | `--crop-by-text` | — | Find rendered HTML text and stack a crop for each match |
-| `-Y` | `--crop-height` | `0` | Height per match in CSS pixels; `0` keeps 180 CSS pixels above and below the match where available |
+| `-O` | `--crop-options` | — | Semicolon-separated crop options, e.g. `height=200;border=1;highlight=1` |
 | `-d` | `--debug` | `false` | Enable debug mode |
 | `-n` | `--no-headless` | `false` | Disable headless mode (show browser window) |
 | `-r` | `--reuse` | `false` | Reuse cached profile (do not delete after execution) |
@@ -112,8 +112,14 @@ After navigation, actions run in this order: clicks → wait-for → hover → s
 
 ```bash
 sesnap -u 'https://example.com/report' -b --crop-by-text '合計金額' \
-  --crop-height 320 -o total.png
+  --crop-options 'height=200;border=1;highlight=1' -o total.png
 ```
+
+`--crop-options` requires `--crop-by-text`. Use any of these options, separated by semicolons:
+
+- `height`: Height per match in CSS pixels. `0` (default) keeps up to 180 CSS pixels above and below the match.
+- `border`: `1` draws a black border around each crop when there are multiple matches; `0` (default) disables it.
+- `highlight`: `1` draws a red outline around the matched text, even for a single match; `0` (default) disables it.
 
 Chrome searches rendered text in the main document, case-sensitively and without regular expressions. No extra tools or language data are needed. Text drawn in images or canvases is not searchable.
 
@@ -154,7 +160,7 @@ Each URL uses a separate tab. `timeout` defaults to 60 seconds; cancellation sto
 
 Set `"sequential_per_domain": true` on either screenshot tool to enable the same hostname grouping within that request (default: `false`). Separate MCP requests are not grouped together.
 
-Both screenshot tools accept `crop_by_text` and `crop_height` with the same semantics as the CLI flags. Set `address_bar: true` to keep the bar above the crops.
+Both screenshot tools accept `crop_by_text` and `crop_options` with the same semantics as the CLI flags. Set `address_bar: true` to keep the bar above the crops.
 
 ### Chrome Profiles
 

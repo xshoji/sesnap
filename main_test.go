@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -50,16 +51,16 @@ func TestCaptureFlags(t *testing.T) {
 	oldClicks, oldChrome := clickSelectors, chromeFlags
 	oldParallel, oldTimeout := *arguments.parallel, *arguments.timeoutSeconds
 	oldGroup := *arguments.sequentialPerDomain
-	oldText, oldHeight := *arguments.cropByText, *arguments.cropHeight
+	oldText, oldOption := *arguments.cropByText, *arguments.cropOption
 	t.Cleanup(func() {
 		clickSelectors, chromeFlags = oldClicks, oldChrome
 		*arguments.parallel, *arguments.timeoutSeconds = oldParallel, oldTimeout
 		*arguments.sequentialPerDomain = oldGroup
-		*arguments.cropByText, *arguments.cropHeight = oldText, oldHeight
+		*arguments.cropByText, *arguments.cropOption = oldText, oldOption
 	})
 	clickSelectors, chromeFlags = nil, nil
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
-	for _, name := range []string{"c", "click", "C", "chrome-flag", "j", "parallel", "t", "timeout", "S", "sequential-per-domain", "T", "crop-by-text", "Y", "crop-height"} {
+	for _, name := range []string{"c", "click", "C", "chrome-flag", "j", "parallel", "t", "timeout", "S", "sequential-per-domain", "T", "crop-by-text", "O", "crop-options"} {
 		f := flag.Lookup(name)
 		if f == nil {
 			t.Fatalf("flag %q is not registered", name)
@@ -71,32 +72,35 @@ func TestCaptureFlags(t *testing.T) {
 		"-C=lang=ja", "--chrome-flag=disable-extensions",
 		"--parallel=5", "-j=2", "--timeout=91", "-t=17",
 		"--sequential-per-domain=false", "-S=true",
-		"--crop-by-text=合計金額", "--crop-height=315",
+		"--crop-by-text=合計金額", "--crop-options=height=315;border=1;highlight=1",
 	}); err != nil {
 		t.Fatal(err)
 	}
+	p, err := captureParamsFromArgs()
+	if err != nil {
+		t.Fatal(err)
+	}
 	want := []string{".menu, .fallback", ".item", ".menu, .fallback"}
-	if got := captureParamsFromArgs().clickSelectors; !reflect.DeepEqual(got, want) {
+	if got := p.clickSelectors; !reflect.DeepEqual(got, want) {
 		t.Fatalf("clicks = %v, want %v", got, want)
 	}
 	if want := (stringSlice{"lang=ja", "disable-extensions"}); !reflect.DeepEqual(chromeFlags, want) {
 		t.Fatalf("chrome flags = %v, want %v", chromeFlags, want)
 	}
-	if *arguments.parallel != 2 || captureParamsFromArgs().timeout != 17*time.Second {
-		t.Fatalf("parallel = %d, timeout = %v", *arguments.parallel, captureParamsFromArgs().timeout)
+	if *arguments.parallel != 2 || p.timeout != 17*time.Second {
+		t.Fatalf("parallel = %d, timeout = %v", *arguments.parallel, p.timeout)
 	}
-	if !captureParamsFromArgs().sequentialPerDomain {
+	if !p.sequentialPerDomain {
 		t.Fatal("sequential-per-domain was not propagated")
 	}
-	p := captureParamsFromArgs()
-	if p.cropByText != "合計金額" || p.cropHeight != 315 {
+	if p.cropByText != "合計金額" || p.cropHeight != 315 || !p.cropBorder || !p.cropHighlight {
 		t.Fatalf("crop flags were not propagated: %+v", p)
 	}
-	if err := fs.Parse([]string{"-T=請求額", "-Y=92"}); err != nil {
+	if err := fs.Parse([]string{"-T=請求額", "-O=height=92;border=0"}); err != nil {
 		t.Fatal(err)
 	}
-	p = captureParamsFromArgs()
-	if p.cropByText != "請求額" || p.cropHeight != 92 || p.timeout != 17*time.Second {
+	p, err = captureParamsFromArgs()
+	if err != nil || p.cropByText != "請求額" || p.cropHeight != 92 || p.cropBorder || p.cropHighlight || p.timeout != 17*time.Second {
 		t.Fatalf("crop aliases did not update crop options independently of timeout: %+v", p)
 	}
 }
@@ -165,8 +169,8 @@ func TestWaitForInputs(t *testing.T) {
 	if err := flag.CommandLine.Parse([]string{"--wait-for=#ready"}); err != nil {
 		t.Fatal(err)
 	}
-	if got := captureParamsFromArgs().waitSelector; got != "#ready" {
-		t.Fatalf("wait-for = %q", got)
+	if p, err := captureParamsFromArgs(); err != nil || p.waitSelector != "#ready" {
+		t.Fatalf("wait-for = %q, %v", p.waitSelector, err)
 	}
 	var req mcp.CallToolRequest
 	req.Params.Arguments = map[string]any{"wait_for": "#ready"}
@@ -591,20 +595,21 @@ func TestE2E_CropByText(t *testing.T) {
 	for _, tc := range []struct {
 		name, needle, selector string
 		full, bar              bool
+		options                string
 		width                  int
 		colors                 []color.RGBA
 	}{
-		{"viewport", "合計金額", "", false, true, 640, []color.RGBA{{254, 241, 220, 255}, {227, 245, 233, 255}, {229, 236, 252, 255}}},
-		{"full page", "合計金額", "", true, false, 640, []color.RGBA{{254, 241, 220, 255}, {227, 245, 233, 255}, {229, 236, 252, 255}}},
-		{"element", "合計金額", "main", false, false, 420, []color.RGBA{{227, 245, 233, 255}}},
-		{"missing", "missing", "", false, false, 0, nil},
+		{"viewport", "合計金額", "", false, true, ";border=1;highlight=1", 640, []color.RGBA{{254, 241, 220, 255}, {227, 245, 233, 255}, {229, 236, 252, 255}}},
+		{"full page", "合計金額", "", true, false, "", 640, []color.RGBA{{254, 241, 220, 255}, {227, 245, 233, 255}, {229, 236, 252, 255}}},
+		{"element", "合計金額", "main", false, false, ";border=1;highlight=1", 420, []color.RGBA{{227, 245, 233, 255}}},
+		{"missing", "missing", "", false, false, "", 0, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			const height = 84
 			var req mcp.CallToolRequest
 			req.Params.Arguments = map[string]any{
 				"urls": []string{srv.URL}, "width": 640, "height": 420, "scale": 2, "wait": 0,
-				"crop_by_text": tc.needle, "crop_height": height, "address_bar": tc.bar, "query": tc.selector, "full": tc.full,
+				"crop_by_text": tc.needle, "crop_options": "height=" + strconv.Itoa(height) + tc.options, "address_bar": tc.bar, "query": tc.selector, "full": tc.full,
 			}
 			result, err := mcpScreenshotHandler(browserCtx, make(chan struct{}, 1), false)(context.Background(), req)
 			if err != nil || result == nil {
@@ -640,8 +645,31 @@ func TestE2E_CropByText(t *testing.T) {
 				t.Fatalf("bounds = %v, want %v", img.Bounds(), want)
 			}
 			for i, want := range tc.colors {
-				if got := color.RGBAModel.Convert(img.At(760, bar+2*height*i+height)); got != want {
+				top := bar + 2*height*i
+				if got := color.RGBAModel.Convert(img.At(760, top+height)); got != want {
 					t.Errorf("match %d background = %v, want %v", i+1, got, want)
+				}
+				border := tc.options != "" && len(tc.colors) > 1
+				for _, pt := range []image.Point{{X: 10, Y: top}, {X: 0, Y: top + height}, {X: 10, Y: top + 2*height - 1}} {
+					if got := color.GrayModel.Convert(img.At(pt.X, pt.Y)); (got == (color.Gray{})) != border {
+						t.Errorf("match %d: border pixel at %v = %v, want border %v", i+1, pt, got, border)
+					}
+				}
+				// A viewport crop includes main's 53 CSS px margin; an element crop excludes it.
+				left := 30
+				if len(tc.colors) > 1 && i == 1 {
+					left += 53
+				}
+				x := 2 * (left - 1)
+				red := color.RGBA{R: 255, A: 255}
+				redRows := 0
+				for y := top; y < top+2*height; y++ {
+					if color.RGBAModel.Convert(img.At(x, y)) == red {
+						redRows++
+					}
+				}
+				if tc.options != "" && redRows < 40 || tc.options == "" && redRows != 0 {
+					t.Errorf("match %d: unexpected highlight at x=%d (%d red rows)", i+1, x, redRows)
 				}
 			}
 		})
@@ -659,7 +687,10 @@ func TestMCPInvalidInputs(t *testing.T) {
 		{"sequential_per_domain": "true"},
 		{"wait_for": 1}, {"wait_for": " "},
 		{"crop_by_text": 1}, {"crop_by_text": " "}, {"crop_by_text": "foo\nbar"},
-		{"crop_height": 12}, {"crop_by_text": "foo", "crop_height": 10.5}, {"crop_by_text": "foo", "crop_height": -1},
+		{"crop_height": 12}, {"crop_options": "height=12"}, {"crop_by_text": "foo", "crop_options": 12},
+		{"crop_by_text": "foo", "crop_options": "height=10.5"}, {"crop_by_text": "foo", "crop_options": "height=-1"},
+		{"crop_by_text": "foo", "crop_options": "unknown=1"}, {"crop_by_text": "foo", "crop_options": "border=2"},
+		{"crop_by_text": "foo", "crop_options": "highlight"}, {"crop_by_text": "foo", "crop_options": "highlight=0;highlight=1"},
 	} {
 		if _, ok := args["urls"]; !ok {
 			args["urls"] = []string{"http://example.com"}

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"html"
 	"image"
+	"image/color"
 	"image/draw"
 	"image/jpeg"
 	"image/png"
@@ -59,6 +60,7 @@ const (
 	defaultWait          = 3
 	defaultQuality       = 80
 	cropMargin           = 180 // CSS pixels above and below the matched line
+	cropOptionHelp       = "Semicolon-separated options for cropping by text: height=200;border=1;highlight=1 (height in CSS pixels, 0 uses the default margin; border and highlight: 0 or 1)"
 	// maxPhysicalDim is Chrome's GPU texture limit in physical pixels.
 	// The actual CSS pixel limit depends on deviceScaleFactor.
 	maxPhysicalDim    int64 = 16384
@@ -95,7 +97,7 @@ var (
 		waitSelector        *string
 		sequentialPerDomain *bool
 		cropByText          *string
-		cropHeight          *int64
+		cropOption          *string
 	}{
 		defineFlagValue("o", "output" /*       */, "" /*               */, Req+"Output path of screenshot (with multiple URLs, auto-numbered: <base>_001.png, _002.png, ...)", flag.String, flag.StringVar),
 		defineFlagValue("q", "query" /*        */, "" /*               */, "Query selector. Screenshot the first matching element. ( e.g. -q=\".className#id\" )", flag.String, flag.StringVar),
@@ -116,7 +118,7 @@ var (
 		defineFlagValue("a", "wait-for", "", "Wait for the first element matching this CSS selector to become visible after clicks, before capture", flag.String, flag.StringVar),
 		defineFlagValue("S", "sequential-per-domain", false, "Capture URLs with the same hostname sequentially in input order; different hostnames remain parallel", flag.Bool, flag.BoolVar),
 		defineFlagValue("T", "crop-by-text", "", "Find rendered HTML text and stack a crop for each match", flag.String, flag.StringVar),
-		defineFlagValue("Y", "crop-height", 0, fmt.Sprintf("Height per match in CSS pixels (0 keeps %d CSS pixels above and below)", cropMargin), flag.Int64, flag.Int64Var),
+		defineFlagValue("O", "crop-options", "", cropOptionHelp, flag.String, flag.StringVar),
 	}
 )
 
@@ -136,10 +138,12 @@ type captureParams struct {
 	timeout             time.Duration
 	sequentialPerDomain bool
 	cropByText          string
-	cropHeight          int64
+	cropHeight          int
+	cropBorder          bool
+	cropHighlight       bool
 }
 
-func captureParamsFromArgs() captureParams {
+func captureParamsFromArgs() (captureParams, error) {
 	// Empty flags retain the legacy no-click behavior.
 	var selectors []string
 	for _, sel := range clickSelectors {
@@ -147,7 +151,7 @@ func captureParamsFromArgs() captureParams {
 			selectors = append(selectors, sel)
 		}
 	}
-	return captureParams{
+	p := captureParams{
 		windowWidth:         *arguments.windowWidth,
 		windowHeight:        *arguments.windowHeight,
 		waitSeconds:         *arguments.waitSeconds,
@@ -162,8 +166,47 @@ func captureParamsFromArgs() captureParams {
 		timeout:             time.Duration(*arguments.timeoutSeconds) * time.Second,
 		sequentialPerDomain: *arguments.sequentialPerDomain,
 		cropByText:          *arguments.cropByText,
-		cropHeight:          *arguments.cropHeight,
 	}
+	err := p.parseCropOption(*arguments.cropOption)
+	return p, err
+}
+
+func (p *captureParams) parseCropOption(raw string) error {
+	if raw == "" {
+		return nil
+	}
+	if p.cropByText == "" {
+		return fmt.Errorf("crop options require text to match")
+	}
+	seen := make(map[string]bool)
+	for part := range strings.SplitSeq(raw, ";") {
+		key, value, ok := strings.Cut(part, "=")
+		key, value = strings.TrimSpace(key), strings.TrimSpace(value)
+		if !ok || seen[key] {
+			return fmt.Errorf("invalid or repeated crop option: %q", part)
+		}
+		seen[key] = true
+		switch key {
+		case "height":
+			n, err := strconv.ParseInt(value, 10, 32)
+			if err != nil || n < 0 {
+				return fmt.Errorf("crop height must be a nonnegative integer of at most %d", math.MaxInt32)
+			}
+			p.cropHeight = int(n)
+		case "border", "highlight":
+			if value != "0" && value != "1" {
+				return fmt.Errorf("crop %s must be 0 or 1", key)
+			}
+			if key == "border" {
+				p.cropBorder = value == "1"
+			} else {
+				p.cropHighlight = value == "1"
+			}
+		default:
+			return fmt.Errorf("unknown crop option: %q", key)
+		}
+	}
+	return nil
 }
 
 // urlGroups preserves input order within each host without occupying capture slots while queued.
@@ -206,12 +249,6 @@ func (p captureParams) validate() error {
 	}
 	if p.cropByText != "" && (strings.TrimSpace(p.cropByText) == "" || strings.ContainsAny(p.cropByText, "\r\n")) {
 		return fmt.Errorf("crop text must be nonblank and on one line")
-	}
-	if p.cropHeight < 0 || p.cropHeight > math.MaxInt32 {
-		return fmt.Errorf("crop height is out of range")
-	}
-	if p.cropByText == "" && p.cropHeight != 0 {
-		return fmt.Errorf("crop height requires text to match")
 	}
 	for i, sel := range p.clickSelectors {
 		if strings.TrimSpace(sel) == "" {
@@ -260,7 +297,10 @@ func run(ctx context.Context) (err error) {
 			deviceScaleFactor = f
 		}
 	}
-	params := captureParamsFromArgs()
+	params, err := captureParamsFromArgs()
+	if err != nil {
+		return err
+	}
 	if err := params.validate(); err != nil {
 		return err
 	}
@@ -790,10 +830,10 @@ func captureRegion(ctx context.Context, p captureParams, clip *page.Viewport) ([
 			selection.removeAllRanges();
 			selection.addRange(previous);
 			while (window.find(text, true, false, false, false, false, false)) {
-				if (!selection.rangeCount) return [];
+				if (!selection.rangeCount) return null;
 				const match = selection.getRangeAt(0).cloneRange();
 				selection.removeAllRanges();
-				if (!root.contains(match.commonAncestorContainer) || match.collapsed) return [];
+				if (!root.contains(match.commonAncestorContainer) || match.collapsed) return null;
 				previous = match;
 				let r = match.getBoundingClientRect();
 				if (fixedViewport) {
@@ -808,11 +848,13 @@ func captureRegion(ctx context.Context, p captureParams, clip *page.Viewport) ([
 				}
 				r = match.getBoundingClientRect();
 				if (r.width > 0 && r.height > 0 && r.right > x && r.left < x + (w || innerWidth) &&
-					r.bottom > y && r.top < y + (h || innerHeight)) return [r.top - y, r.bottom - y];
+					r.bottom > y && r.top < y + (h || innerHeight)) {
+					return {left: r.left - x, top: r.top - y, right: r.right - x, bottom: r.bottom - y};
+				}
 				selection.addRange(previous);
 			}
 			selection.removeAllRanges();
-			return [];
+			return null;
 		};
 	})(` + string(args) + `)`).Do(ctx)
 	if err != nil {
@@ -829,6 +871,7 @@ func captureRegion(ctx context.Context, p captureParams, clip *page.Viewport) ([
 	}
 	var strips []*image.RGBA
 	var totalHeight int
+	stroke := max(1, int(math.Round(p.scaleFactor)))
 	advance := fmt.Sprintf("function() { return this(%f,%f,%f,%f); }", x, y, w, h)
 	for {
 		result, exception, err := cdpruntime.CallFunctionOn(advance).
@@ -839,11 +882,11 @@ func captureRegion(ctx context.Context, p captureParams, clip *page.Viewport) ([
 		if exception != nil {
 			return nil, fmt.Errorf("search HTML text: %w", exception)
 		}
-		var line []float64
-		if err := json.Unmarshal(result.Value, &line); err != nil {
+		var match *struct{ Left, Top, Right, Bottom float64 }
+		if err := json.Unmarshal(result.Value, &match); err != nil {
 			return nil, err
 		}
-		if len(line) == 0 {
+		if match == nil {
 			break
 		}
 		buf, err := captureViewport(ctx, clip)
@@ -855,11 +898,11 @@ func captureRegion(ctx context.Context, p captureParams, clip *page.Viewport) ([
 			return nil, err
 		}
 		w, h := img.Bounds().Dx(), img.Bounds().Dy()
-		top := max(0, int(math.Floor((line[0]-cropMargin)*p.scaleFactor)))
-		bottom := min(h, int(math.Ceil((line[1]+cropMargin)*p.scaleFactor)))
+		top := max(0, int(math.Floor((match.Top-cropMargin)*p.scaleFactor)))
+		bottom := min(h, int(math.Ceil((match.Bottom+cropMargin)*p.scaleFactor)))
 		if p.cropHeight > 0 {
 			height := int(min(float64(h), max(1, math.Round(float64(p.cropHeight)*p.scaleFactor))))
-			top = min(max(0, int(math.Floor(((line[0]+line[1])*p.scaleFactor-float64(height))/2))), h-height)
+			top = min(max(0, int(math.Floor(((match.Top+match.Bottom)*p.scaleFactor-float64(height))/2))), h-height)
 			bottom = top + height
 		}
 		totalHeight += bottom - top
@@ -868,6 +911,12 @@ func captureRegion(ctx context.Context, p captureParams, clip *page.Viewport) ([
 		}
 		strip := image.NewRGBA(image.Rect(0, 0, w, bottom-top))
 		draw.Draw(strip, strip.Bounds(), img, image.Pt(0, top), draw.Src)
+		if p.cropHighlight {
+			// Convert the match from capture CSS pixels to this strip's physical pixels.
+			r := image.Rect(int(math.Floor(match.Left*p.scaleFactor)), int(math.Floor(match.Top*p.scaleFactor))-top,
+				int(math.Ceil(match.Right*p.scaleFactor)), int(math.Ceil(match.Bottom*p.scaleFactor))-top)
+			drawOutline(strip, r.Inset(-stroke), stroke, color.RGBA{R: 255, A: 255})
+		}
 		strips = append(strips, strip)
 	}
 	if len(strips) == 0 {
@@ -878,6 +927,9 @@ func captureRegion(ctx context.Context, p captureParams, clip *page.Viewport) ([
 		result = image.NewRGBA(image.Rect(0, 0, result.Bounds().Dx(), totalHeight))
 		y := 0
 		for _, strip := range strips {
+			if p.cropBorder {
+				drawOutline(strip, strip.Bounds(), stroke, color.Black)
+			}
 			draw.Draw(result, strip.Bounds().Add(image.Pt(0, y)), strip, image.Point{}, draw.Src)
 			y += strip.Bounds().Dy()
 		}
@@ -887,6 +939,19 @@ func captureRegion(ctx context.Context, p captureParams, clip *page.Viewport) ([
 		return nil, fmt.Errorf("encode cropped screenshot: %w", err)
 	}
 	return out.Bytes(), ctx.Err()
+}
+
+func drawOutline(img *image.RGBA, r image.Rectangle, width int, c color.Color) {
+	width = min(width, r.Dx(), r.Dy())
+	ink := image.NewUniform(c)
+	for _, edge := range [...]image.Rectangle{
+		image.Rect(r.Min.X, r.Min.Y, r.Max.X, r.Min.Y+width),
+		image.Rect(r.Min.X, r.Max.Y-width, r.Max.X, r.Max.Y),
+		image.Rect(r.Min.X, r.Min.Y, r.Min.X+width, r.Max.Y),
+		image.Rect(r.Max.X-width, r.Min.Y, r.Max.X, r.Max.Y),
+	} {
+		draw.Draw(img, edge, ink, image.Point{}, draw.Src)
+	}
 }
 
 // expandSelectElements injects JavaScript that replaces <select> elements
@@ -1331,7 +1396,7 @@ func runMCPServer(ctx, browserCtx context.Context, sem chan struct{}) error {
 		mcp.WithString("expand_select", mcp.Description("Expand <select> elements as HTML overlay. Use CSS selector or \"*\" for all")),
 		mcp.WithBoolean("address_bar", mcp.Description("Add browser-style address bar to screenshot (default: false)")),
 		mcp.WithString("crop_by_text", mcp.Description("Find rendered HTML text and stack a crop for each match")),
-		mcp.WithNumber("crop_height", mcp.Description(fmt.Sprintf("Height per match in CSS pixels (0 keeps %d CSS pixels above and below)", cropMargin))),
+		mcp.WithString("crop_options", mcp.Description(cropOptionHelp)),
 		mcp.WithString("format", mcp.Description("Image format: \"png\" or \"jpeg\" (default: \"png\")")),
 		mcp.WithNumber("quality", mcp.Description("JPEG quality 1-100 (default: 80, only used with format=jpeg)")),
 		mcp.WithNumber("scale", mcp.Description("Device scale factor (default: 1.0)")),
@@ -1374,6 +1439,9 @@ func runMCPServer(ctx, browserCtx context.Context, sem chan struct{}) error {
 // mcpCaptureParams builds captureParams from MCP tool request arguments.
 func mcpCaptureParams(request mcp.CallToolRequest) (captureParams, error) {
 	args := request.GetArguments()
+	if _, ok := args["crop_height"]; ok {
+		return captureParams{}, fmt.Errorf("crop_height was replaced by crop_options; use height=<pixels>")
+	}
 	values := map[string]float64{}
 	for _, spec := range []struct {
 		key                string
@@ -1385,7 +1453,6 @@ func mcpCaptureParams(request mcp.CallToolRequest) (captureParams, error) {
 		{"timeout", captureTimeout.Seconds(), 1, float64(maxWaitSeconds)},
 		{"quality", defaultQuality, 1, 100},
 		{"scale", 1, 0, float64(maxPhysicalDim)},
-		{"crop_height", 0, 0, math.MaxInt32},
 	} {
 		value := spec.fallback
 		if raw, ok := args[spec.key]; ok {
@@ -1404,7 +1471,7 @@ func mcpCaptureParams(request mcp.CallToolRequest) (captureParams, error) {
 		}
 		values[spec.key] = value
 	}
-	for _, key := range []string{"query", "click", "wait_for", "hover", "expand_select", "format", "output", "crop_by_text"} {
+	for _, key := range []string{"query", "click", "wait_for", "hover", "expand_select", "format", "output", "crop_by_text", "crop_options"} {
 		if raw, ok := args[key]; ok {
 			if _, ok := raw.(string); !ok {
 				return captureParams{}, fmt.Errorf("%s must be a string", key)
@@ -1456,7 +1523,9 @@ func mcpCaptureParams(request mcp.CallToolRequest) (captureParams, error) {
 		timeout:             time.Duration(values["timeout"]) * time.Second,
 		sequentialPerDomain: request.GetBool("sequential_per_domain", false),
 		cropByText:          request.GetString("crop_by_text", ""),
-		cropHeight:          int64(values["crop_height"]),
+	}
+	if err := p.parseCropOption(request.GetString("crop_options", "")); err != nil {
+		return captureParams{}, err
 	}
 	return p, p.validate()
 }
