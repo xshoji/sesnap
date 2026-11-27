@@ -1,4 +1,7 @@
 version: 2
+release:
+  replace_existing_artifacts: true
+
 builds:
   - main: main.go
     binary: sesnap

@@ -200,20 +200,20 @@ SESNAP_E2E=1 go test -v
 
 ## Release
 
-The release flow for this repository is automated with GitHub Actions.
-Pushing Git tags triggers the release job.
+Pushing a version tag runs the `release` workflow: it tests, builds, publishes
+the GitHub release, and updates the Homebrew cask.
 
-```
+```bash
 # Release
-git tag v0.0.1 && git push --tags
+v=v0.4.1; git tag "${v}" && git push origin "refs/tags/${v}"
 
-
-# Delete tag
-v="v0.0.1"; git tag -d "${v}" && git push origin :"${v}"
-
-# Delete tag and recreate new tag and push
-v="v0.0.1"; git tag -d "${v}" && git push origin :"${v}"; git tag "${v}"; git push --tags
+# Move the tag to HEAD and re-run the release
+v=v0.4.1; git tag -f "${v}" && git push -f origin "refs/tags/${v}"
 ```
+
+Deleting a tag turns its release into a draft. Move the tag instead to keep the
+release and its existing notes while replacing its assets. Checksums change;
+fix an already published version with a new version instead.
 
 ## License
 
