@@ -118,14 +118,15 @@ sesnap -u 'https://example.com/report' -b --crop-by-text '合計金額' \
 `--crop-options` requires `--crop-by-text`. Use any of these options, separated by semicolons:
 
 - `height`: Height per match in CSS pixels. `0` (default) keeps up to 180 CSS pixels above and below the match.
-- `border`: `1` draws a black border around each crop when there are multiple matches; `0` (default) disables it.
+- `border`: `1` draws a black border around each crop when multiple crops remain; `0` (default) disables it.
 - `highlight`: `1` draws a red outline around the matched text, even for a single match; `0` (default) disables it.
+- `ignoreindex`: Comma-separated match numbers to skip, e.g. `ignoreindex=1,2,3`. Numbering starts at 1 in search order for each URL, before any exclusions. Numbers beyond the last match are ignored. This skips crops; it does not redact text visible in other crops.
 
 Chrome searches rendered text in the main document, case-sensitively and without regular expressions. No extra tools or language data are needed. Text drawn in images or canvases is not searchable.
 
 In viewport mode sesnap scrolls to matches, including ones below the fold. With `-f` or `-q`, matches are limited to the full-page capture area or the selected element, respectively. Each match retains the capture area's full width. A positive height centers the crop on the match, shifting it inward at the edges where necessary. The crops are stacked in search order into one image per URL. With `-b`, the address bar is added once at the top; it is not searched or counted in the crop height.
 
-No match is a capture error for that URL; no image is written for it. Other URLs still run.
+If no text matches or all matches are skipped, no image is written for that URL and a capture error is returned. Other URLs still run.
 
 ### MCP Server Mode
 

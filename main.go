@@ -60,7 +60,7 @@ const (
 	defaultWait          = 3
 	defaultQuality       = 80
 	cropMargin           = 180 // CSS pixels above and below the matched line
-	cropOptionHelp       = "Semicolon-separated options for cropping by text: height=200;border=1;highlight=1 (height in CSS pixels, 0 uses the default margin; border and highlight: 0 or 1)"
+	cropOptionHelp       = "Semicolon-separated options for cropping by text: height=200;border=1;highlight=1;ignoreindex=1,2,3 (height in CSS pixels, 0 uses the default margin; border and highlight: 0 or 1; ignoreindex skips 1-based matches)"
 	// maxPhysicalDim is Chrome's GPU texture limit in physical pixels.
 	// The actual CSS pixel limit depends on deviceScaleFactor.
 	maxPhysicalDim    int64 = 16384
@@ -141,6 +141,7 @@ type captureParams struct {
 	cropHeight          int
 	cropBorder          bool
 	cropHighlight       bool
+	cropIgnored         map[int]bool
 }
 
 func captureParamsFromArgs() (captureParams, error) {
@@ -201,6 +202,15 @@ func (p *captureParams) parseCropOption(raw string) error {
 				p.cropBorder = value == "1"
 			} else {
 				p.cropHighlight = value == "1"
+			}
+		case "ignoreindex":
+			p.cropIgnored = make(map[int]bool)
+			for item := range strings.SplitSeq(value, ",") {
+				index, err := strconv.Atoi(strings.TrimSpace(item))
+				if err != nil || index < 1 {
+					return fmt.Errorf("%s requires positive integers: %q", key, item)
+				}
+				p.cropIgnored[index] = true
 			}
 		default:
 			return fmt.Errorf("unknown crop option: %q", key)
@@ -870,7 +880,7 @@ func captureRegion(ctx context.Context, p captureParams, clip *page.Viewport) ([
 		x, y, w, h = clip.X, clip.Y, clip.Width, clip.Height
 	}
 	var strips []*image.RGBA
-	var totalHeight int
+	var totalHeight, matchIndex int
 	stroke := max(1, int(math.Round(p.scaleFactor)))
 	advance := fmt.Sprintf("function() { return this(%f,%f,%f,%f); }", x, y, w, h)
 	for {
@@ -888,6 +898,10 @@ func captureRegion(ctx context.Context, p captureParams, clip *page.Viewport) ([
 		}
 		if match == nil {
 			break
+		}
+		matchIndex++
+		if p.cropIgnored[matchIndex] {
+			continue
 		}
 		buf, err := captureViewport(ctx, clip)
 		if err != nil {
@@ -919,8 +933,11 @@ func captureRegion(ctx context.Context, p captureParams, clip *page.Viewport) ([
 		}
 		strips = append(strips, strip)
 	}
-	if len(strips) == 0 {
+	if matchIndex == 0 {
 		return nil, fmt.Errorf("text not found in capture area: %q", p.cropByText)
+	}
+	if len(strips) == 0 {
+		return nil, fmt.Errorf("all matches excluded by ignoreindex: %q", p.cropByText)
 	}
 	result := strips[0]
 	if len(strips) > 1 {

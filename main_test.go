@@ -598,11 +598,14 @@ func TestE2E_CropByText(t *testing.T) {
 		options                string
 		width                  int
 		colors                 []color.RGBA
+		wantError              string
 	}{
-		{"viewport", "合計金額", "", false, true, ";border=1;highlight=1", 640, []color.RGBA{{254, 241, 220, 255}, {227, 245, 233, 255}, {229, 236, 252, 255}}},
-		{"full page", "合計金額", "", true, false, "", 640, []color.RGBA{{254, 241, 220, 255}, {227, 245, 233, 255}, {229, 236, 252, 255}}},
-		{"element", "合計金額", "main", false, false, ";border=1;highlight=1", 420, []color.RGBA{{227, 245, 233, 255}}},
-		{"missing", "missing", "", false, false, "", 0, nil},
+		{"viewport", "合計金額", "", false, true, ";border=1;highlight=1", 640, []color.RGBA{{254, 241, 220, 255}, {227, 245, 233, 255}, {229, 236, 252, 255}}, ""},
+		{"full page", "合計金額", "", true, false, "", 640, []color.RGBA{{254, 241, 220, 255}, {227, 245, 233, 255}, {229, 236, 252, 255}}, ""},
+		{"element", "合計金額", "main", false, false, ";border=1;highlight=1", 420, []color.RGBA{{227, 245, 233, 255}}, ""},
+		{"exclude first and third", "合計金額", "", false, false, ";border=1;ignoreindex=3,1,4", 640, []color.RGBA{{227, 245, 233, 255}}, ""},
+		{"exclude all", "合計金額", "", false, false, ";ignoreindex=1,2,3", 0, nil, "all matches excluded by ignoreindex"},
+		{"missing", "missing", "", false, false, "", 0, nil, `text not found in capture area: "missing"`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			const height = 84
@@ -615,9 +618,9 @@ func TestE2E_CropByText(t *testing.T) {
 			if err != nil || result == nil {
 				t.Fatalf("result = %v, error = %v", result, err)
 			}
-			if len(tc.colors) == 0 {
-				if !result.IsError || !strings.Contains(result.Content[0].(mcp.TextContent).Text, `text not found in capture area: "missing"`) {
-					t.Fatalf("expected a no-match error, got %+v", result)
+			if tc.wantError != "" {
+				if !result.IsError || !strings.Contains(result.Content[0].(mcp.TextContent).Text, tc.wantError) {
+					t.Fatalf("expected error %q, got %+v", tc.wantError, result)
 				}
 				return
 			}
@@ -649,7 +652,7 @@ func TestE2E_CropByText(t *testing.T) {
 				if got := color.RGBAModel.Convert(img.At(760, top+height)); got != want {
 					t.Errorf("match %d background = %v, want %v", i+1, got, want)
 				}
-				border := tc.options != "" && len(tc.colors) > 1
+				border := strings.Contains(tc.options, ";border=1") && len(tc.colors) > 1
 				for _, pt := range []image.Point{{X: 10, Y: top}, {X: 0, Y: top + height}, {X: 10, Y: top + 2*height - 1}} {
 					if got := color.GrayModel.Convert(img.At(pt.X, pt.Y)); (got == (color.Gray{})) != border {
 						t.Errorf("match %d: border pixel at %v = %v, want border %v", i+1, pt, got, border)
@@ -668,7 +671,8 @@ func TestE2E_CropByText(t *testing.T) {
 						redRows++
 					}
 				}
-				if tc.options != "" && redRows < 40 || tc.options == "" && redRows != 0 {
+				highlight := strings.Contains(tc.options, ";highlight=1")
+				if highlight && redRows < 40 || !highlight && redRows != 0 {
 					t.Errorf("match %d: unexpected highlight at x=%d (%d red rows)", i+1, x, redRows)
 				}
 			}
@@ -691,6 +695,7 @@ func TestMCPInvalidInputs(t *testing.T) {
 		{"crop_by_text": "foo", "crop_options": "height=10.5"}, {"crop_by_text": "foo", "crop_options": "height=-1"},
 		{"crop_by_text": "foo", "crop_options": "unknown=1"}, {"crop_by_text": "foo", "crop_options": "border=2"},
 		{"crop_by_text": "foo", "crop_options": "highlight"}, {"crop_by_text": "foo", "crop_options": "highlight=0;highlight=1"},
+		{"crop_by_text": "foo", "crop_options": "ignoreindex=1,0"}, {"crop_by_text": "foo", "crop_options": "ignoreindex=1,"},
 	} {
 		if _, ok := args["urls"]; !ok {
 			args["urls"] = []string{"http://example.com"}
